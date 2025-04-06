@@ -1,2 +1,3 @@
 llama-2-7b-chat.Q3_K_L.gguf
 *.jpg
+*.pyc

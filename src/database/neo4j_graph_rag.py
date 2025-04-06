@@ -3,17 +3,20 @@ from langchain_neo4j import Neo4jVector
 from langchain.schema import Document
 from langchain.storage import InMemoryStore
 from langchain.chains import RetrievalQA
-from langchain_community.llms import LlamaCpp, HuggingFaceHub
+from langchain_community.llms import LlamaCpp
+from langchain_huggingface import HuggingFaceEndpoint
 from ..config import *
 from ..encoders.multimodal_encoder import MultiModalEncoder
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain.retrievers import MultiVectorRetriever
 import numpy as np
+import os
 
 # Neo4j圖資料庫工具類
 class Neo4jGraphRAG:
-    def __init__(self, use_local_llm=True):
+    def __init__(self, use_local_llm=True, use_mock=False):
         self.encoder = MultiModalEncoder()
+        self.use_mock = use_mock
         
         # 初始化LLM - 可以選擇本地模型或HuggingFace Hub上的模型
         if use_local_llm:
@@ -29,87 +32,118 @@ class Neo4jGraphRAG:
             except Exception as e:
                 print(f"无法加载本地LLM，将使用HuggingFace模型: {e}")
                 # 如果本地模型加载失败，回退到HuggingFace Hub
-                self.llm = HuggingFaceHub(
-                    repo_id="google/flan-t5-base",  # 较小的模型，速度更快
-                    model_kwargs={"temperature": 0.1, "max_length": 512}
-                )
+                try:
+                    self.llm = HuggingFaceEndpoint(
+                        repo_id="google/flan-t5-base",  # 较小的模型，速度更快
+                        task="text2text-generation",
+                        temperature=0.1,
+                        max_length=512
+                    )
+                except Exception as e:
+                    print(f"使用 HuggingFaceEndpoint 失敗: {e}")
+                    # 使用簡單文本為備用
+                    self.llm = None
         else:
             # 使用HuggingFace Hub上的模型
-            self.llm = HuggingFaceHub(
-                repo_id="google/flan-t5-xl",  # 或其他您喜欢的模型
-                model_kwargs={"temperature": 0.1, "max_length": 512}
-            )
+            try:
+                self.llm = HuggingFaceEndpoint(
+                    repo_id="google/flan-t5-xl",  # 或其他您喜欢的模型
+                    task="text2text-generation",
+                    temperature=0.1,
+                    max_length=512
+                )
+            except Exception as e:
+                print(f"使用 HuggingFaceEndpoint 失敗: {e}")
+                # 使用簡單文本為備用
+                self.llm = None
         
-        self.driver = GraphDatabase.driver(
-            NEO4J_URI, 
-            auth=(NEO4J_USERNAME, NEO4J_PASSWORD)
-        )
-        
-        # 确保Neo4j中存在必要的索引和约束
-        self._setup_database()
-        
-        # 使用HuggingFace Embeddings初始化向量存储
-        embeddings_model = HuggingFaceEmbeddings(
-            model_name="sentence-transformers/all-MiniLM-L6-v2",
-            model_kwargs={"device": "cpu"},
-            encode_kwargs={"normalize_embeddings": True}
-        )
-        
-        # 初始化向量存储
-        try:
-            # 尝试从现有索引创建
-            self.vector_store = Neo4jVector.from_existing_index(
-                embedding=embeddings_model,
-                url=NEO4J_URI,
-                username=NEO4J_USERNAME,
-                password=NEO4J_PASSWORD,
-                database=NEO4J_DATABASE,
-                index_name="multimedia_vector_index",
-                node_label="MultimediaContent",
-                text_node_property="description",
-                embedding_node_property="embedding"
-            )
-        except ValueError as e:
-            # 如果维度不匹配，手动创建新的向量存储
-            if "dimensions do not match" in str(e):
-                print("創建新的Neo4j向量存儲")
-                
-                # 使用Neo4jVector的原始构造函数
-                self.vector_store = Neo4jVector(
-                    embedding=embeddings_model,
-                    url=NEO4J_URI,
-                    username=NEO4J_USERNAME,
-                    password=NEO4J_PASSWORD,
-                    database=NEO4J_DATABASE,
-                    index_name="multimedia_vector_index",
-                    node_label="MultimediaContent",
-                    text_node_property="description",
-                    embedding_node_property="embedding"
+        if not use_mock:
+            try:
+                self.driver = GraphDatabase.driver(
+                    NEO4J_URI, 
+                    auth=(NEO4J_USERNAME, NEO4J_PASSWORD)
                 )
                 
-                # 确保索引存在
+                # 测试连接
                 with self.driver.session(database=NEO4J_DATABASE) as session:
-                    try:
-                        session.run("""
-                            MATCH (n:MultimediaContent)
-                            RETURN count(n) as count
-                        """)
-                        print("成功连接到Neo4j并验证MultimediaContent节点")
-                    except Exception as e:
-                        print(f"验证Neo4j连接失败: {e}")
-            else:
-                # 其他错误
-                raise e
-        
-        # 初始化多向量检索器的存储
-        self.doc_store = InMemoryStore()
-        
-        # 初始化多向量检索器
-        self.retriever = MultiVectorRetriever(
-            vectorstore=self.vector_store,
-            docstore=self.doc_store,
-            id_key="doc_id"
-        )
+                    session.run("RETURN 1")
+                    print("成功连接到Neo4j数据库")
+                    
+                # 确保Neo4j中存在必要的索引和约束
+                self._setup_database()
+                
+                # 使用HuggingFace Embeddings初始化向量存储
+                # 注意: 我们现在不需要单独的文本嵌入模型，因为我们使用CLIP进行文本和图像嵌入
+                embeddings_model = HuggingFaceEmbeddings(
+                    model_name="sentence-transformers/all-MiniLM-L6-v2",
+                    model_kwargs={"device": "cpu"},
+                    encode_kwargs={"normalize_embeddings": True}
+                )
+                
+                # 初始化向量存储
+                try:
+                    # 尝试从现有索引创建
+                    self.vector_store = Neo4jVector.from_existing_index(
+                        embedding=embeddings_model,
+                        url=NEO4J_URI,
+                        username=NEO4J_USERNAME,
+                        password=NEO4J_PASSWORD,
+                        database=NEO4J_DATABASE,
+                        index_name="multimedia_vector_index",
+                        node_label="MultimediaContent",
+                        text_node_property="description",
+                        embedding_node_property="embedding"
+                    )
+                except ValueError as e:
+                    # 如果维度不匹配，手动创建新的向量存储
+                    if "dimensions do not match" in str(e):
+                        print("創建新的Neo4j向量存儲")
+                        
+                        # 使用Neo4jVector的原始构造函数
+                        self.vector_store = Neo4jVector(
+                            embedding=embeddings_model,
+                            url=NEO4J_URI,
+                            username=NEO4J_USERNAME,
+                            password=NEO4J_PASSWORD,
+                            database=NEO4J_DATABASE,
+                            index_name="multimedia_vector_index",
+                            node_label="MultimediaContent",
+                            text_node_property="description",
+                            embedding_node_property="embedding"
+                        )
+                        
+                        # 确保索引存在
+                        with self.driver.session(database=NEO4J_DATABASE) as session:
+                            try:
+                                session.run("""
+                                    MATCH (n:MultimediaContent)
+                                    RETURN count(n) as count
+                                """)
+                                print("成功连接到Neo4j并验证MultimediaContent节点")
+                            except Exception as e:
+                                print(f"验证Neo4j连接失败: {e}")
+                    else:
+                        # 其他错误
+                        raise e
+                
+                # 初始化多向量检索器的存储
+                self.doc_store = InMemoryStore()
+                
+                # 初始化多向量检索器
+                self.retriever = MultiVectorRetriever(
+                    vectorstore=self.vector_store,
+                    docstore=self.doc_store,
+                    id_key="doc_id"
+                )
+            except Exception as e:
+                print(f"Neo4j连接失败，切换到模拟模式: {e}")
+                self.use_mock = True
+                self.doc_store = InMemoryStore()
+                self.mock_docs = []
+        else:
+            print("使用模拟模式，不连接Neo4j数据库")
+            self.doc_store = InMemoryStore()
+            self.mock_docs = []
     
     def _setup_database(self):
         """设置Neo4j数据库，创建索引和约束"""
@@ -147,11 +181,11 @@ class Neo4jGraphRAG:
                                 FOR (n:MultimediaContent)
                                 ON (n.embedding)
                                 OPTIONS {indexConfig: {
-                                    `vector.dimensions`: 2048,
+                                    `vector.dimensions`: 512,
                                     `vector.similarity_function`: 'cosine'
                                 }}
                             """)
-                            print("Neo4j 5.x: 成功创建2048维向量索引")
+                            print("Neo4j 5.x: 成功创建512维向量索引")
                         except Exception as e:
                             print(f"创建Neo4j 5.x向量索引失败: {e}")
                 else:
@@ -162,11 +196,11 @@ class Neo4jGraphRAG:
                               'multimedia_vector_index',
                               'MultimediaContent',
                               'embedding',
-                              2048,
+                              512,
                               'cosine'
                             )
                         """)
-                        print("Neo4j 4.x: 成功创建2048维向量索引")
+                        print("Neo4j 4.x: 成功创建512维向量索引")
                     except Exception as e:
                         if "equivalent index already exists" in str(e):
                             print("Neo4j 4.x: 索引已存在")
@@ -182,7 +216,7 @@ class Neo4jGraphRAG:
                           'multimedia_vector_index',
                           'MultimediaContent',
                           'embedding',
-                          2048,
+                          512,
                           'cosine'
                         )
                     """)
@@ -190,61 +224,131 @@ class Neo4jGraphRAG:
                     print(f"尝试创建索引时出错: {e2}")
     
     def add_image(self, image_path, metadata=None):
-        """添加图片到图数据库"""
+        """添加图片到图数据库，如果已存在則跳過"""
         if metadata is None:
             metadata = {}
         
-        # 为图片生成描述
-        description = self.encoder.generate_text_description(image_path, self.llm)
+        # 檢查圖片是否已存在於數據庫中
+        image_basename = os.path.basename(image_path)
+        existing_id = None
         
-        # 编码图片
-        image_embedding = self.encoder.encode_image(image_path)
+        if not self.use_mock:
+            try:
+                with self.driver.session(database=NEO4J_DATABASE) as session:
+                    # 查詢數據庫中是否已有相同檔名的圖片
+                    result = session.run("""
+                        MATCH (n:MultimediaContent:Image)
+                        WHERE n.filename = $filename
+                        RETURN n.id as id
+                    """, {"filename": image_basename})
+                    
+                    record = result.single()
+                    if record:
+                        existing_id = record["id"]
+                        print(f"圖片 {image_basename} 已存在於數據庫中，ID: {existing_id}")
+                        return existing_id
+            except Exception as e:
+                print(f"檢查圖片存在時發生錯誤: {e}")
+                # 繼續添加圖片
+        else:
+            # 模擬模式下檢查是否已存在
+            for doc in self.mock_docs:
+                if doc.get("metadata", {}).get("filename") == image_basename:
+                    print(f"圖片 {image_basename} 已存在於模擬數據庫中，ID: {doc['id']}")
+                    return doc["id"]
         
-        # 生成唯一ID
-        doc_id = f"img_{os.path.basename(image_path)}_{np.random.randint(10000, 99999)}"
-        
-        # 创建文档对象
-        doc = Document(
-            page_content=description,
-            metadata={
-                "doc_id": doc_id,
-                "type": "image",
-                "path": image_path,
-                "description": description,
-                **metadata
-            }
-        )
-        
-        # 保存到doc store
-        self.doc_store.mset([(doc_id, doc)])
-        
-        # 为这个文档在Neo4j中创建节点
-        with self.driver.session(database=NEO4J_DATABASE) as session:
-            session.run("""
-                CREATE (n:MultimediaContent:Image {
-                    id: $id,
-                    path: $path,
-                    type: 'image',
-                    description: $description,
-                    embedding: $embedding
-                })
-                RETURN n
-            """, {
-                "id": doc_id,
-                "path": image_path,
-                "description": description,
-                "embedding": image_embedding.tolist()
-            })
+        try:
+            # 為圖片生成描述
+            description = "A image containing " + image_basename
             
-            # 添加额外的元数据作为属性
-            for key, value in metadata.items():
-                if isinstance(value, (str, int, float, bool)):
-                    session.run("""
-                        MATCH (n:MultimediaContent {id: $id})
-                        SET n.$key = $value
-                    """, {"id": doc_id, "key": key, "value": value})
-        
-        return doc_id
+            # 如果LLM可用，嘗試生成更好的描述
+            try:
+                llm_description = self.encoder.generate_text_description(image_path, self.llm)
+                if llm_description and len(llm_description) > 10:
+                    description = llm_description
+            except Exception as e:
+                print(f"使用LLM生成描述失敗，使用默認描述: {e}")
+            
+            # 編碼圖片
+            image_embedding = self.encoder.encode_image(image_path)
+            
+            # 生成唯一ID
+            doc_id = f"img_{os.path.basename(image_path)}_{np.random.randint(10000, 99999)}"
+            
+            # 添加檔名到元數據
+            metadata["filename"] = image_basename
+            
+            # 创建文档对象
+            doc = Document(
+                page_content=description,
+                metadata={
+                    "doc_id": doc_id,
+                    "type": "image",
+                    "path": image_path,
+                    "description": description,
+                    **metadata
+                }
+            )
+            
+            # 保存到doc store
+            self.doc_store.mset([(doc_id, doc)])
+            
+            if not self.use_mock:
+                try:
+                    # 为这个文档在Neo4j中创建节点
+                    with self.driver.session(database=NEO4J_DATABASE) as session:
+                        # 創建主節點
+                        session.run("""
+                            CREATE (n:MultimediaContent:Image {
+                            id: $id,
+                            path: $path,
+                            filename: $filename,
+                            type: 'image',
+                            description: $description,
+                            embedding: $embedding
+                        })
+                        RETURN n
+                    """, {
+                        "id": doc_id,
+                        "path": image_path,
+                        "filename": image_basename,
+                        "description": description,
+                        "embedding": image_embedding.tolist()
+                    })
+                
+                        # 添加額外元數據（安全的方式）
+                        if metadata:
+                            valid_metadata = {k:v for k,v in metadata.items() 
+                                            if isinstance(v, (str, int, float, bool))}
+                            if valid_metadata:
+                                session.run("""
+                                    MATCH (n:MultimediaContent {id: $id})
+                                    SET n += $properties
+                                """, {"id": doc_id, "properties": valid_metadata})
+                    
+                    print(f"圖片 {image_basename} 已成功添加到Neo4j數據庫，ID: {doc_id}")
+                except Exception as e:
+                    print(f"添加圖片到Neo4j時發生錯誤: {e}")
+                    # 如果Neo4j存儲失敗，仍然返回文檔ID，因為它已經在內存中
+            else:
+                # 模拟模式：只存储在内存中
+                self.mock_docs.append({
+                    "id": doc_id,
+                    "type": "image",
+                    "path": image_path,
+                    "filename": image_basename,
+                    "description": description,
+                    "embedding": image_embedding,
+                    "metadata": metadata
+                })
+                print(f"圖片 {image_basename} 已成功添加到模擬數據庫，ID: {doc_id}")
+            
+            return doc_id
+        except Exception as e:
+            print(f"添加圖片過程中發生未處理的錯誤: {e}")
+            if existing_id:
+                return existing_id
+            return None
     
     def add_video(self, video_path, metadata=None):
         """添加视频到图数据库"""
@@ -362,6 +466,10 @@ class Neo4jGraphRAG:
         if properties is None:
             properties = {}
             
+        if self.use_mock:
+            print(f"模拟创建关系: {source_id} -> {relationship_type} -> {target_id}")
+            return True
+        
         with self.driver.session(database=NEO4J_DATABASE) as session:
             # 创建关系
             result = session.run("""
@@ -379,15 +487,168 @@ class Neo4jGraphRAG:
             return result.single() is not None
     
     def search(self, query, k=5):
-        """基于文本查询检索相关的多媒体内容"""
-        # 使用多向量检索器检索内容
-        docs = self.retriever.invoke(query, config={"k": k})
-        return docs
+        """基于文本查询检索相关的多媒体内容，使用CLIP进行跨模态检索"""
+        try:
+            # 使用CLIP对查询文本进行编码
+            text_embedding = self.encoder.encode_text(query)
+            
+            if self.use_mock:
+                # 模拟模式：在内存中计算余弦相似度
+                results = []
+                for doc in self.mock_docs:
+                    image_embedding = doc["embedding"]
+                    # 计算余弦相似度
+                    similarity = np.dot(text_embedding, image_embedding) / (
+                        np.linalg.norm(text_embedding) * np.linalg.norm(image_embedding))
+                    doc_copy = doc.copy()
+                    doc_copy["score"] = float(similarity)
+                    results.append(doc_copy)
+                
+                # 按相似度排序
+                results.sort(key=lambda x: x["score"], reverse=True)
+                results = results[:k]
+                
+                # 转换为Document对象
+                docs = []
+                for result in results:
+                    metadata = {
+                        "doc_id": result["id"],
+                        "type": result["type"],
+                        "path": result["path"],
+                        "score": result["score"]
+                    }
+                    metadata.update(result.get("metadata", {}))
+                    
+                    doc = Document(
+                        page_content=result["description"],
+                        metadata=metadata
+                    )
+                    docs.append(doc)
+                
+                return docs
+            
+            # 手动构建Cypher查询来查找相似的向量
+            try:
+                with self.driver.session(database=NEO4J_DATABASE) as session:
+                    # 执行向量相似度查询
+                    result = session.run("""
+                        CALL db.index.vector.queryNodes(
+                          'multimedia_vector_index',
+                          $k,
+                          $embedding
+                        ) YIELD node, score
+                        RETURN node.id as id, node.type as type, node.path as path, 
+                               node.description as description, node.url as url, 
+                               node.title as title, node.filename as filename, score
+                        ORDER BY score DESC
+                    """, {
+                        "k": k,
+                        "embedding": text_embedding.tolist()
+                    })
+                    
+                    # 处理结果
+                    docs = []
+                    for record in result:
+                        doc_id = record["id"]
+                        
+                        # 计算绝对路径（如果有必要）
+                        path = record["path"]
+                        
+                        # 查找文档存储中的文档
+                        stored_doc = self.doc_store.mget([doc_id])[0]
+                        
+                        # 如果文档存储中没有该文档，则创建一个新的
+                        if stored_doc is None:
+                            metadata = {
+                                "doc_id": doc_id,
+                                "type": record["type"],
+                                "path": path,
+                                "score": record["score"]
+                            }
+                            
+                            # 根据不同类型添加不同的元数据
+                            if record["url"]:
+                                metadata["url"] = record["url"]
+                            if record["title"]:
+                                metadata["title"] = record["title"]
+                            if record["filename"]:
+                                metadata["filename"] = record["filename"]
+                            
+                            doc = Document(
+                                page_content=record["description"] or "No description available",
+                                metadata=metadata
+                            )
+                        else:
+                            # 添加相似度分数到现有文档的元数据
+                            stored_doc.metadata["score"] = record["score"]
+                            doc = stored_doc
+                        
+                        docs.append(doc)
+                    
+                    return docs
+            except Exception as e:
+                print(f"執行Neo4j向量查詢時發生錯誤: {e}")
+                # 如果Neo4j查詢失敗，嘗試從內存中檢索
+                print("嘗試從內存中檢索...")
+                
+                # 從文檔存儲檢索所有文檔
+                all_docs = []
+                for doc_id in self.doc_store.yield_keys():
+                    doc = self.doc_store.mget([doc_id])[0]
+                    if doc:
+                        all_docs.append(doc)
+                
+                if not all_docs:
+                    print("內存中沒有文檔")
+                    return []
+                
+                # 手動計算相似度
+                for doc in all_docs:
+                    # 獲取圖片路徑
+                    path = doc.metadata.get("path")
+                    if path and os.path.exists(path):
+                        try:
+                            # 編碼圖片
+                            image_embedding = self.encoder.encode_image(path)
+                            # 計算余弦相似度
+                            similarity = np.dot(text_embedding, image_embedding) / (
+                                np.linalg.norm(text_embedding) * np.linalg.norm(image_embedding))
+                            doc.metadata["score"] = float(similarity)
+                        except Exception as inner_e:
+                            print(f"計算圖片 {path} 的相似度時發生錯誤: {inner_e}")
+                            doc.metadata["score"] = 0.0
+                    else:
+                        doc.metadata["score"] = 0.0
+                
+                # 排序並返回結果
+                all_docs.sort(key=lambda x: x.metadata.get("score", 0), reverse=True)
+                return all_docs[:k]
+        
+        except Exception as e:
+            print(f"Error during CLIP-based search: {e}")
+            if not self.use_mock:
+                try:
+                    # 如果失败，回退到传统的检索方法
+                    print("Falling back to traditional retrieval method")
+                    docs = self.retriever.invoke(query, config={"k": k})
+                    return docs
+                except Exception as e2:
+                    print(f"传统检索方法也失败了: {e2}")
+                    return []
+            else:
+                # 模拟模式下没有传统检索方法
+                print("Error in mock mode search")
+                return []
     
     def graph_search(self, query, k=5, max_hops=2):
         """使用图结构进行高级检索，考虑节点之间的关系"""
         # 首先获取最相关的节点
         initial_docs = self.search(query, k=k)
+        
+        if self.use_mock:
+            # 模拟模式下没有图结构
+            return initial_docs
+        
         initial_ids = [doc.metadata["doc_id"] for doc in initial_docs]
         
         # 使用Cypher查询进行图扩展
@@ -401,9 +662,9 @@ class Neo4jGraphRAG:
                     RETURN related
                     LIMIT 10
                 }
-                RETURN DISTINCT related.id as id, related.type as type, 
-                       related.description as description, related.path as path,
-                       related.url as url, related.title as title
+                RETURN DISTINCT related.id as id, related.type as type, related.path as path, 
+                       related.description as description, related.url as url, 
+                       related.title as title
             """, {
                 "ids": initial_ids,
                 "max_hops": max_hops
@@ -412,8 +673,9 @@ class Neo4jGraphRAG:
             # 处理结果
             related_docs = []
             for record in result:
-                # 查找对应的文档
                 doc_id = record["id"]
+                
+                # 查找文档存储中的文档
                 doc = self.doc_store.mget([doc_id])[0]
                 if doc:
                     related_docs.append(doc)
@@ -457,6 +719,34 @@ class Neo4jGraphRAG:
         if not docs:
             return "没有找到相關的多媒體内容来回答您的問題。"
             
+        if self.use_mock:
+            # 模拟模式下的简单实现
+            descriptions = [doc.page_content for doc in docs]
+            combined_description = " ".join(descriptions)
+            
+            prompt = f"""根据以下图片描述，回答问题：
+描述：{combined_description}
+
+问题：{query}
+"""
+            answer = self.llm.invoke(prompt)
+            
+            # 格式化源文檔信息
+            sources_info = []
+            for doc in docs:
+                doc_type = doc.metadata.get("type", "unknown")
+                if doc_type == "image":
+                    sources_info.append(f"圖片: {doc.metadata.get('path', 'unknown')}")
+                elif doc_type == "video":
+                    sources_info.append(f"影片: {doc.metadata.get('title', 'unknown')}")
+                elif doc_type == "youtube_video":
+                    sources_info.append(f"YouTube影片: {doc.metadata.get('title', 'unknown')} ({doc.metadata.get('url', 'unknown')})")
+            
+            # 構建最终回答
+            final_answer = f"{answer}\n\n信息来源:\n" + "\n".join(sources_info)
+            
+            return final_answer
+        
         # 构建问答链
         qa_chain = RetrievalQA.from_chain_type(
             llm=self.llm,
