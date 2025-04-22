@@ -141,63 +141,31 @@ class MultiModalEncoder:
             return None, {}
     
     def generate_text_description(self, image_path, llm=None):
-        """透過CLIP產生圖片內容描述"""
+        """使用BLIP模型生成圖片描述"""
         try:
+            from transformers import BlipProcessor, BlipForConditionalGeneration
+            import torch
+            from PIL import Image
+            
+            # 初始化BLIP模型和處理器
+            processor = BlipProcessor.from_pretrained("Salesforce/blip-image-captioning-base")
+            model = BlipForConditionalGeneration.from_pretrained("Salesforce/blip-image-captioning-base")
+            
+            # 讀取並處理圖片
             image = Image.open(image_path).convert('RGB')
+            inputs = processor(images=image, return_tensors="pt")
+            print(image_path)
             
-            # 預定義一些常見的視覺概念
-            candidate_labels = [
-                "a photograph of a person",
-                "a photograph of an animal",
-                "a photograph of a landscape",
-                "a photograph of food",
-                "a photograph of a building",
-                "a photograph of a vehicle",
-                "a photograph of nature",
-                "a photograph of technology",
-                "a photograph of art",
-                "a photograph of a group of people"
-            ]
-            
-            # 處理圖像
-            image_inputs = self.clip_processor(images=image, return_tensors="pt")
-            
-            # 處理文本
-            text_inputs = self.clip_processor(text=candidate_labels, return_tensors="pt", padding=True)
-            
-            # 計算特徵
+            # 生成描述
             with torch.no_grad():
-                image_features = self.clip_model.get_image_features(**image_inputs)
-                text_features = self.clip_model.get_text_features(**text_inputs)
+                out = model.generate(**inputs, max_length=50, num_beams=5)
+                description = processor.decode(out[0], skip_special_tokens=True)
             
-            # 計算相似度
-            image_features = image_features / image_features.norm(dim=1, keepdim=True)
-            text_features = text_features / text_features.norm(dim=1, keepdim=True)
-            similarity = (100.0 * image_features @ text_features.T).softmax(dim=-1)
-            
-            # 獲取前3個最相似的標籤
-            values, indices = similarity[0].topk(3)
-            top_predictions = [(candidate_labels[i], values[idx].item()) for idx, i in enumerate(indices)]
-            
-            # 構造描述
-            description = f"This image appears to be {top_predictions[0][0]} (confidence: {top_predictions[0][1]:.2f})"
-            if top_predictions[1][1] > 0.15:  # 只有當第二個類別置信度足夠高時才添加
-                description += f", and may also contain {top_predictions[1][0].replace('a photograph of ', '')}"
-            
-            # 如果提供了LLM，使用它來生成更豐富的描述
-            if llm is not None:
-                try:
-                    # 獲取前3個類別作為提示
-                    categories_text = ", ".join([label.replace('a photograph of ', '') for label, _ in top_predictions[:3]])
-                    prompt = f"Based on image classification results suggesting this image contains: {categories_text}, generate a detailed description of what might be in this image."
-                    response = llm.invoke(prompt)
-                    if response and len(response) > 20:  # 确保LLM返回了有意义的描述
-                        return response
-                except Exception as e:
-                    print(f"LLM description generation failed: {e}")
-                    # 繼續使用基本描述
+            # 確保描述的首字母大寫
+            description = description[0].upper() + description[1:]
             
             return description
+            
         except Exception as e:
-            print(f"Error generating image description with CLIP: {e}")
+            print(f"Error generating image description with BLIP: {e}")
             return "No description available"

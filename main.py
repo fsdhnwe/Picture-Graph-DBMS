@@ -12,7 +12,7 @@ def add_images_to_db(graph_rag, image_dir):
     # 添加圖片
     print("添加圖片到圖數據庫...")
     # 只處理指定的兩張圖片
-    target_images = ["stairs-7245353_1280.jpg", "pngtree-stairs-famous-road-stairs-photo-image_1094418.jpg"]
+    target_images = ["phone.jpg"]
     
     for image_file in target_images:
         image_path = os.path.join(image_dir, image_file)

@@ -5,8 +5,10 @@ from langchain.storage import InMemoryStore
 from langchain.chains import RetrievalQA
 from langchain_community.llms import LlamaCpp
 from langchain_huggingface import HuggingFaceEndpoint
-from ..config import *
-from ..encoders.multimodal_encoder import MultiModalEncoder
+from langchain.llms import HuggingFacePipeline
+from transformers import AutoTokenizer, AutoModelForSeq2SeqLM, pipeline
+from src.config import *
+from src.encoders.multimodal_encoder import MultiModalEncoder
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain.retrievers import MultiVectorRetriever
 import numpy as np
@@ -31,29 +33,43 @@ class Neo4jGraphRAG:
                 )
             except Exception as e:
                 print(f"无法加载本地LLM，将使用HuggingFace模型: {e}")
-                # 如果本地模型加载失败，回退到HuggingFace Hub
+                # 如果本地模型加载失败，回退到本地HuggingFace模型
                 try:
-                    self.llm = HuggingFaceEndpoint(
-                        repo_id="google/flan-t5-base",  # 较小的模型，速度更快
-                        task="text2text-generation",
-                        temperature=0.1,
+                    # 使用本地HuggingFace模型
+                    model_name = "google/flan-t5-base"
+                    tokenizer = AutoTokenizer.from_pretrained(model_name)
+                    model = AutoModelForSeq2SeqLM.from_pretrained(model_name)
+                    
+                    pipe = pipeline(
+                        "text2text-generation", 
+                        model=model, 
+                        tokenizer=tokenizer, 
                         max_length=512
                     )
+                    
+                    self.llm = HuggingFacePipeline(pipeline=pipe)
                 except Exception as e:
-                    print(f"使用 HuggingFaceEndpoint 失敗: {e}")
+                    print(f"使用本地HuggingFace模型失敗: {e}")
                     # 使用簡單文本為備用
                     self.llm = None
         else:
             # 使用HuggingFace Hub上的模型
             try:
-                self.llm = HuggingFaceEndpoint(
-                    repo_id="google/flan-t5-xl",  # 或其他您喜欢的模型
-                    task="text2text-generation",
-                    temperature=0.1,
+                # 使用本地HuggingFace模型
+                model_name = "google/flan-t5-large"
+                tokenizer = AutoTokenizer.from_pretrained(model_name)
+                model = AutoModelForSeq2SeqLM.from_pretrained(model_name)
+                
+                pipe = pipeline(
+                    "text2text-generation", 
+                    model=model, 
+                    tokenizer=tokenizer, 
                     max_length=512
                 )
+                
+                self.llm = HuggingFacePipeline(pipeline=pipe)
             except Exception as e:
-                print(f"使用 HuggingFaceEndpoint 失敗: {e}")
+                print(f"使用本地HuggingFace模型失敗: {e}")
                 # 使用簡單文本為備用
                 self.llm = None
         
@@ -486,9 +502,18 @@ class Neo4jGraphRAG:
             
             return result.single() is not None
     
-    def search(self, query, k=5):
-        """基于文本查询检索相关的多媒体内容，使用CLIP进行跨模态检索"""
+    def search(self, query, k=5, min_similarity=0.65):
+        """基于文本查询检索相关的多媒体内容，使用CLIP进行跨模态检索
+        
+        Args:
+            query: 查询文本
+            k: 返回结果数量
+            min_similarity: 最低相似度阈值，低于此值的结果将被过滤掉
+        """
         try:
+            # 解析查询意图关键词
+            query_keywords = query.lower().split()
+            
             # 使用CLIP对查询文本进行编码
             text_embedding = self.encoder.encode_text(query)
             
@@ -500,9 +525,22 @@ class Neo4jGraphRAG:
                     # 计算余弦相似度
                     similarity = np.dot(text_embedding, image_embedding) / (
                         np.linalg.norm(text_embedding) * np.linalg.norm(image_embedding))
-                    doc_copy = doc.copy()
-                    doc_copy["score"] = float(similarity)
-                    results.append(doc_copy)
+                    
+                    # 检查描述中是否包含查询关键词
+                    description = doc.get("description", "").lower()
+                    keyword_matches = sum(1 for kw in query_keywords if kw in description)
+                    
+                    # 根据关键词匹配调整相似度分数
+                    adjusted_similarity = similarity
+                    if keyword_matches > 0:
+                        adjusted_similarity = similarity * (1 + 0.1 * keyword_matches)
+                    
+                    # 只添加高于阈值的结果
+                    if adjusted_similarity >= min_similarity:
+                        doc_copy = doc.copy()
+                        doc_copy["score"] = float(adjusted_similarity)
+                        doc_copy["original_score"] = float(similarity)
+                        results.append(doc_copy)
                 
                 # 按相似度排序
                 results.sort(key=lambda x: x["score"], reverse=True)
@@ -515,7 +553,8 @@ class Neo4jGraphRAG:
                         "doc_id": result["id"],
                         "type": result["type"],
                         "path": result["path"],
-                        "score": result["score"]
+                        "score": result["score"],
+                        "original_score": result.get("original_score", result["score"])
                     }
                     metadata.update(result.get("metadata", {}))
                     
@@ -530,11 +569,11 @@ class Neo4jGraphRAG:
             # 手动构建Cypher查询来查找相似的向量
             try:
                 with self.driver.session(database=NEO4J_DATABASE) as session:
-                    # 执行向量相似度查询
+                    # 执行向量相似度查询 - 获取更多候选项以便过滤
                     result = session.run("""
                         CALL db.index.vector.queryNodes(
                           'multimedia_vector_index',
-                          $k,
+                          $expanded_k,
                           $embedding
                         ) YIELD node, score
                         RETURN node.id as id, node.type as type, node.path as path, 
@@ -542,13 +581,35 @@ class Neo4jGraphRAG:
                                node.title as title, node.filename as filename, score
                         ORDER BY score DESC
                     """, {
-                        "k": k,
+                        "expanded_k": k * 3,  # 获取更多候选结果以进行过滤
                         "embedding": text_embedding.tolist()
                     })
                     
                     # 处理结果
                     docs = []
-                    for record in result:
+                    records = list(result)
+                    
+                    for record in records:
+                        # 获取原始分数
+                        original_score = record["score"]
+                        
+                        # 如果分数低于阈值，跳过
+                        if original_score < min_similarity:
+                            continue
+                            
+                        # 文本相关性分析
+                        description = record["description"] or ""
+                        # 检查描述中是否包含查询关键词
+                        keyword_matches = sum(1 for kw in query_keywords if kw.lower() in description.lower())
+
+                        print(f"Doc: {record['title']} - Original Score: {original_score} - Keyword Matches: {keyword_matches}")
+
+                        
+                        # 根据关键词匹配调整相似度分数
+                        adjusted_score = original_score
+                        if keyword_matches > 0:
+                            adjusted_score = original_score * (1 + 0.1 * keyword_matches)
+                            
                         doc_id = record["id"]
                         
                         # 计算绝对路径（如果有必要）
@@ -563,7 +624,9 @@ class Neo4jGraphRAG:
                                 "doc_id": doc_id,
                                 "type": record["type"],
                                 "path": path,
-                                "score": record["score"]
+                                "score": adjusted_score,
+                                "original_score": original_score,
+                                "keyword_matches": keyword_matches
                             }
                             
                             # 根据不同类型添加不同的元数据
@@ -575,17 +638,21 @@ class Neo4jGraphRAG:
                                 metadata["filename"] = record["filename"]
                             
                             doc = Document(
-                                page_content=record["description"] or "No description available",
+                                page_content=description or "No description available",
                                 metadata=metadata
                             )
                         else:
                             # 添加相似度分数到现有文档的元数据
-                            stored_doc.metadata["score"] = record["score"]
+                            stored_doc.metadata["score"] = adjusted_score
+                            stored_doc.metadata["original_score"] = original_score
+                            stored_doc.metadata["keyword_matches"] = keyword_matches
                             doc = stored_doc
                         
                         docs.append(doc)
                     
-                    return docs
+                    # 按调整后的分数重新排序
+                    docs.sort(key=lambda x: x.metadata["score"], reverse=True)
+                    return docs[:k]  # 返回top-k结果
             except Exception as e:
                 print(f"執行Neo4j向量查詢時發生錯誤: {e}")
                 # 如果Neo4j查詢失敗，嘗試從內存中檢索
@@ -603,6 +670,7 @@ class Neo4jGraphRAG:
                     return []
                 
                 # 手動計算相似度
+                filtered_docs = []
                 for doc in all_docs:
                     # 獲取圖片路徑
                     path = doc.metadata.get("path")
@@ -613,16 +681,29 @@ class Neo4jGraphRAG:
                             # 計算余弦相似度
                             similarity = np.dot(text_embedding, image_embedding) / (
                                 np.linalg.norm(text_embedding) * np.linalg.norm(image_embedding))
-                            doc.metadata["score"] = float(similarity)
+                            
+                            # 检查描述中是否包含查询关键词
+                            description = doc.page_content.lower()
+                            keyword_matches = sum(1 for kw in query_keywords if kw in description)
+                            
+                            # 根据关键词匹配调整相似度分数
+                            adjusted_similarity = similarity
+                            if keyword_matches > 0:
+                                adjusted_similarity = similarity * (1 + 0.1 * keyword_matches)
+                                
+                            # 只保留高于阈值的结果
+                            if adjusted_similarity >= min_similarity:
+                                doc.metadata["score"] = float(adjusted_similarity)
+                                doc.metadata["original_score"] = float(similarity)
+                                doc.metadata["keyword_matches"] = keyword_matches
+                                filtered_docs.append(doc)
+                            
                         except Exception as inner_e:
                             print(f"計算圖片 {path} 的相似度時發生錯誤: {inner_e}")
-                            doc.metadata["score"] = 0.0
-                    else:
-                        doc.metadata["score"] = 0.0
-                
+                    
                 # 排序並返回結果
-                all_docs.sort(key=lambda x: x.metadata.get("score", 0), reverse=True)
-                return all_docs[:k]
+                filtered_docs.sort(key=lambda x: x.metadata.get("score", 0), reverse=True)
+                return filtered_docs[:k]
         
         except Exception as e:
             print(f"Error during CLIP-based search: {e}")
@@ -640,10 +721,17 @@ class Neo4jGraphRAG:
                 print("Error in mock mode search")
                 return []
     
-    def graph_search(self, query, k=5, max_hops=2):
-        """使用图结构进行高级检索，考虑节点之间的关系"""
+    def graph_search(self, query, k=5, max_hops=2, min_similarity=0.65):
+        """使用图结构进行高级检索，考虑节点之间的关系
+        
+        Args:
+            query: 查询文本
+            k: 返回结果数量
+            max_hops: 图遍历的最大跳数
+            min_similarity: 最低相似度阈值
+        """
         # 首先获取最相关的节点
-        initial_docs = self.search(query, k=k)
+        initial_docs = self.search(query, k=k, min_similarity=min_similarity)
         
         if self.use_mock:
             # 模拟模式下没有图结构
@@ -710,10 +798,15 @@ class Neo4jGraphRAG:
         
         return docs
     
-    def qa_with_multimedia(self, query):
-        """基于多媒體内容的問答"""
+    def qa_with_multimedia(self, query, min_similarity=0.65):
+        """基于多媒體内容的問答
+        
+        Args:
+            query: 查询文本
+            min_similarity: 最低相似度阈值
+        """
         # 检索相关内容
-        docs = self.graph_search(query, k=3)
+        docs = self.graph_search(query, k=3, min_similarity=min_similarity)
         
         # 如果没有找到相關内容
         if not docs:
@@ -724,7 +817,7 @@ class Neo4jGraphRAG:
             descriptions = [doc.page_content for doc in docs]
             combined_description = " ".join(descriptions)
             
-            prompt = f"""根据以下图片描述，回答问题：
+            prompt = f"""根據以下圖片描述，回答問題：
 描述：{combined_description}
 
 问题：{query}
@@ -735,12 +828,14 @@ class Neo4jGraphRAG:
             sources_info = []
             for doc in docs:
                 doc_type = doc.metadata.get("type", "unknown")
+                score = doc.metadata.get("score", 0)
+                
                 if doc_type == "image":
-                    sources_info.append(f"圖片: {doc.metadata.get('path', 'unknown')}")
+                    sources_info.append(f"圖片: {doc.metadata.get('path', 'unknown')} (相似度: {score:.4f})")
                 elif doc_type == "video":
-                    sources_info.append(f"影片: {doc.metadata.get('title', 'unknown')}")
+                    sources_info.append(f"影片: {doc.metadata.get('title', 'unknown')} (相似度: {score:.4f})")
                 elif doc_type == "youtube_video":
-                    sources_info.append(f"YouTube影片: {doc.metadata.get('title', 'unknown')} ({doc.metadata.get('url', 'unknown')})")
+                    sources_info.append(f"YouTube影片: {doc.metadata.get('title', 'unknown')} ({doc.metadata.get('url', 'unknown')}) (相似度: {score:.4f})")
             
             # 構建最终回答
             final_answer = f"{answer}\n\n信息来源:\n" + "\n".join(sources_info)
@@ -766,12 +861,14 @@ class Neo4jGraphRAG:
         sources_info = []
         for doc in source_docs:
             doc_type = doc.metadata.get("type", "unknown")
+            score = doc.metadata.get("score", 0)
+            
             if doc_type == "image":
-                sources_info.append(f"圖片: {doc.metadata.get('path', 'unknown')}")
+                sources_info.append(f"圖片: {doc.metadata.get('path', 'unknown')} (相似度: {score:.4f})")
             elif doc_type == "video":
-                sources_info.append(f"影片: {doc.metadata.get('title', 'unknown')}")
+                sources_info.append(f"影片: {doc.metadata.get('title', 'unknown')} (相似度: {score:.4f})")
             elif doc_type == "youtube_video":
-                sources_info.append(f"YouTube影片: {doc.metadata.get('title', 'unknown')} ({doc.metadata.get('url', 'unknown')})")
+                sources_info.append(f"YouTube影片: {doc.metadata.get('title', 'unknown')} ({doc.metadata.get('url', 'unknown')}) (相似度: {score:.4f})")
         
         # 構建最终回答
         final_answer = f"{answer}\n\n信息来源:\n" + "\n".join(sources_info)
