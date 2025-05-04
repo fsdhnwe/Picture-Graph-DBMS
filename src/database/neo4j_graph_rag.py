@@ -239,7 +239,130 @@ class Neo4jGraphRAG:
                 except Exception as e2:
                     print(f"尝试创建索引时出错: {e2}")
     
-    def add_image(self, image_path, metadata=None):
+    def create_or_get_tag(self, tag_name):
+        """創建標籤節點，如果已存在則返回現有節點ID"""
+        if self.use_mock:
+            # 模擬模式
+            tag_id = f"tag_{tag_name.lower().replace(' ', '_')}"
+            exists = False
+            for doc in self.mock_docs:
+                if doc.get("type") == "tag" and doc.get("name") == tag_name:
+                    exists = True
+                    return doc.get("id")
+            
+            if not exists:
+                self.mock_docs.append({
+                    "id": tag_id,
+                    "type": "tag",
+                    "name": tag_name
+                })
+            return tag_id
+        
+        try:
+            with self.driver.session(database=NEO4J_DATABASE) as session:
+                # 檢查標籤是否已存在
+                result = session.run("""
+                    MATCH (t:Tag {name: $name})
+                    RETURN t.id as id
+                """, {"name": tag_name})
+                
+                record = result.single()
+                if record:
+                    # 標籤已存在，返回ID
+                    return record["id"]
+                
+                # 標籤不存在，創建新標籤
+                tag_id = f"tag_{tag_name.lower().replace(' ', '_')}"
+                session.run("""
+                    CREATE (t:Tag {
+                        id: $id,
+                        name: $name,
+                        created_at: datetime()
+                    })
+                    RETURN t
+                """, {
+                    "id": tag_id,
+                    "name": tag_name
+                })
+                
+                return tag_id
+        except Exception as e:
+            print(f"創建標籤時發生錯誤: {e}")
+            return None
+    
+    def add_tag_to_image(self, image_id, tag_name):
+        """將標籤添加到圖片"""
+        # 獲取或創建標籤節點
+        tag_id = self.create_or_get_tag(tag_name)
+        if not tag_id:
+            return False
+        
+        if self.use_mock:
+            print(f"模擬添加標籤: {image_id} -> HAS_TAG -> {tag_id}")
+            return True
+        
+        try:
+            with self.driver.session(database=NEO4J_DATABASE) as session:
+                # 創建圖片與標籤之間的關係
+                session.run("""
+                    MATCH (i:MultimediaContent:Image {id: $image_id})
+                    MATCH (t:Tag {id: $tag_id})
+                    MERGE (i)-[r:HAS_TAG]->(t)
+                    RETURN r
+                """, {
+                    "image_id": image_id,
+                    "tag_id": tag_id
+                })
+                
+                return True
+        except Exception as e:
+            print(f"添加標籤到圖片時發生錯誤: {e}")
+            return False
+    
+    def get_all_tags(self):
+        """獲取所有標籤"""
+        if self.use_mock:
+            tags = []
+            for doc in self.mock_docs:
+                if doc.get("type") == "tag":
+                    tags.append({"id": doc.get("id"), "name": doc.get("name")})
+            return tags
+        
+        try:
+            with self.driver.session(database=NEO4J_DATABASE) as session:
+                result = session.run("""
+                    MATCH (t:Tag)
+                    RETURN t.id as id, t.name as name
+                    ORDER BY t.name
+                """)
+                
+                tags = [{"id": record["id"], "name": record["name"]} for record in result]
+                return tags
+        except Exception as e:
+            print(f"獲取標籤時發生錯誤: {e}")
+            return []
+    
+    def get_image_tags(self, image_id):
+        """獲取圖片的所有標籤"""
+        if self.use_mock:
+            # 模擬模式
+            return []
+        
+        try:
+            with self.driver.session(database=NEO4J_DATABASE) as session:
+                result = session.run("""
+                    MATCH (i:MultimediaContent:Image {id: $image_id})-[:HAS_TAG]->(t:Tag)
+                    RETURN t.id as id, t.name as name
+                    ORDER BY t.name
+                """, {"image_id": image_id})
+                
+                tags = [{"id": record["id"], "name": record["name"]} for record in result]
+                return tags
+        except Exception as e:
+            print(f"獲取圖片標籤時發生錯誤: {e}")
+            return []
+    
+    def add_image(self, image_path, metadata=None, tags=None):
         """添加图片到图数据库，如果已存在則跳過"""
         if metadata is None:
             metadata = {}
@@ -262,6 +385,12 @@ class Neo4jGraphRAG:
                     if record:
                         existing_id = record["id"]
                         print(f"圖片 {image_basename} 已存在於數據庫中，ID: {existing_id}")
+                        
+                        # 如果提供了標籤，添加到現有圖片
+                        if tags:
+                            for tag in tags:
+                                self.add_tag_to_image(existing_id, tag)
+                        
                         return existing_id
             except Exception as e:
                 print(f"檢查圖片存在時發生錯誤: {e}")
@@ -341,6 +470,14 @@ class Neo4jGraphRAG:
                                     MATCH (n:MultimediaContent {id: $id})
                                     SET n += $properties
                                 """, {"id": doc_id, "properties": valid_metadata})
+                        
+                        # 添加標籤
+                        if tags:
+                            for tag in tags:
+                                self.add_tag_to_image(doc_id, tag)
+                        
+                        # 檢查與其他圖片的相似度，建立關係
+                        self._check_and_create_similarity_relations(doc_id, image_embedding)
                     
                     print(f"圖片 {image_basename} 已成功添加到Neo4j數據庫，ID: {doc_id}")
                 except Exception as e:
@@ -365,6 +502,102 @@ class Neo4jGraphRAG:
             if existing_id:
                 return existing_id
             return None
+    
+    def _check_and_create_similarity_relations(self, image_id, image_embedding):
+        """檢查新增圖片與現有圖片的相似度，並創建相似關係，使用APOC進行批次操作"""
+        if self.use_mock:
+            return
+        
+        try:
+            with self.driver.session(database=NEO4J_DATABASE) as session:
+                # 使用APOC進行批次向量比較，計算余弦相似度
+                result = session.run("""
+                    MATCH (new:MultimediaContent:Image {id: $image_id})
+                    MATCH (existing:MultimediaContent:Image)
+                    WHERE existing.id <> $image_id AND existing.embedding IS NOT NULL
+                    WITH new, existing, 
+                         apoc.text.distance.cosine(new.embedding, existing.embedding) AS similarity
+                    WHERE similarity >= 0.75
+                    RETURN existing.id AS id, similarity AS score
+                    ORDER BY similarity DESC
+                    LIMIT 20
+                """, {
+                    "image_id": image_id
+                })
+                
+                # 收集所有需要創建關係的對
+                similar_pairs = [(record["id"], record["score"]) for record in result]
+                
+                if similar_pairs:
+                    # 使用APOC批次創建雙向關係
+                    # 注意：APOC的create.relationship會自動處理方向性
+                    pairs_param = [
+                        {"img1": image_id, "img2": similar_id, "score": similarity}
+                        for similar_id, similarity in similar_pairs
+                    ]
+                    
+                    # 執行批次創建關係
+                    session.run("""
+                        UNWIND $pairs AS pair
+                        MATCH (img1:MultimediaContent:Image {id: pair.img1})
+                        MATCH (img2:MultimediaContent:Image {id: pair.img2})
+                        CALL apoc.create.relationship(img1, 'SIMILAR', {score: pair.score}, img2) YIELD rel as r1
+                        CALL apoc.create.relationship(img2, 'SIMILAR', {score: pair.score}, img1) YIELD rel as r2
+                        RETURN count(*)
+                    """, {"pairs": pairs_param})
+                    
+                    # 輸出日誌
+                    for similar_id, similarity in similar_pairs:
+                        print(f"使用APOC創建雙向相似關係: {image_id} <-> SIMILAR({similarity:.4f}) <-> {similar_id}")
+                
+                print(f"成功使用APOC處理 {len(similar_pairs)} 個相似圖片關係")
+                
+        except Exception as e:
+            print(f"檢查圖片相似度時發生錯誤: {e}")
+            # 嘗試退回到基本方法
+            print("嘗試使用基本方法創建相似關係...")
+            try:
+                # 基本方法：直接使用Cypher計算相似度並創建關係
+                with self.driver.session(database=NEO4J_DATABASE) as session:
+                    # 查找相似的圖片
+                    result = session.run("""
+                        MATCH (n:MultimediaContent:Image)
+                        WHERE n.id <> $image_id
+                        WITH n, 
+                             reduce(s = 0.0, i IN range(0, size(n.embedding)-1) | 
+                                s + n.embedding[i] * $embedding[i]) / 
+                             (sqrt(reduce(s = 0.0, x IN n.embedding | s + x * x)) * 
+                              sqrt(reduce(s = 0.0, x IN $embedding | s + x * x))) as score
+                        WHERE score >= 0.75
+                        RETURN n.id as id, score
+                        ORDER BY score DESC
+                        LIMIT 20
+                    """, {
+                        "embedding": image_embedding.tolist(),
+                        "image_id": image_id
+                    })
+                    
+                    # 創建相似關係
+                    for record in result:
+                        similar_id = record["id"]
+                        similarity = record["score"]
+                        
+                        # 創建雙向相似關係
+                        session.run("""
+                            MATCH (img1:MultimediaContent:Image {id: $img1_id})
+                            MATCH (img2:MultimediaContent:Image {id: $img2_id})
+                            MERGE (img1)-[r1:SIMILAR {score: $score}]->(img2)
+                            MERGE (img2)-[r2:SIMILAR {score: $score}]->(img1)
+                            RETURN r1, r2
+                        """, {
+                            "img1_id": image_id,
+                            "img2_id": similar_id,
+                            "score": similarity
+                        })
+                        
+                        print(f"創建雙向相似關係: {image_id} <-> SIMILAR({similarity:.4f}) <-> {similar_id}")
+            except Exception as e2:
+                print(f"基本方法也失敗了: {e2}")
     
     def add_video(self, video_path, metadata=None):
         """添加视频到图数据库"""
@@ -502,7 +735,7 @@ class Neo4jGraphRAG:
             
             return result.single() is not None
     
-    def search(self, query, k=5, min_similarity=0.65):
+    def search(self, query, k=5, min_similarity=0.7):
         """基于文本查询检索相关的多媒体内容，使用CLIP进行跨模态检索
         
         Args:
@@ -571,18 +804,34 @@ class Neo4jGraphRAG:
                 with self.driver.session(database=NEO4J_DATABASE) as session:
                     # 执行向量相似度查询 - 获取更多候选项以便过滤
                     result = session.run("""
-                        CALL db.index.vector.queryNodes(
-                          'multimedia_vector_index',
-                          $expanded_k,
-                          $embedding
-                        ) YIELD node, score
-                        RETURN node.id as id, node.type as type, node.path as path, 
-                               node.description as description, node.url as url, 
-                               node.title as title, node.filename as filename, score
-                        ORDER BY score DESC
+                        MATCH (node:MultimediaContent:Image)
+                        WHERE NOT node.id IN $existing_ids
+                        WITH node, 
+                             reduce(s = 0.0, i IN range(0, size(node.embedding)-1) | 
+                                s + node.embedding[i] * $embedding[i]) / 
+                             (sqrt(reduce(s = 0.0, x IN node.embedding | s + x * x)) * 
+                              sqrt(reduce(s = 0.0, x IN $embedding | s + x * x))) as score
+                        WHERE score >= $min_similarity
+                        
+                        // 獲取標籤匹配計數
+                        OPTIONAL MATCH (node)-[:HAS_TAG]->(t:Tag)
+                        WHERE t.id IN $tag_ids
+                        
+                        WITH node, score, count(DISTINCT t) as tag_match_count
+                        
+                        RETURN node.id as id, node.path as path, 
+                               node.description as description, 
+                               node.filename as filename,
+                               'VECTOR_MATCH' as match_type,
+                               tag_match_count,
+                               score as initial_score
+                        ORDER BY tag_match_count DESC, score DESC
+                        LIMIT 20
                     """, {
-                        "expanded_k": k * 3,  # 获取更多候选结果以进行过滤
-                        "embedding": text_embedding.tolist()
+                        "embedding": text_embedding.tolist(),
+                        "existing_ids": [img["id"] for img in results],
+                        "tag_ids": [tag["id"] for tag in results if tag.get("type") == "tag"],
+                        "min_similarity": min_similarity
                     })
                     
                     # 处理结果
@@ -721,7 +970,7 @@ class Neo4jGraphRAG:
                 print("Error in mock mode search")
                 return []
     
-    def graph_search(self, query, k=5, max_hops=2, min_similarity=0.65):
+    def graph_search(self, query, k=5, max_hops=2, min_similarity=0.7):
         """使用图结构进行高级检索，考虑节点之间的关系
         
         Args:
@@ -798,7 +1047,7 @@ class Neo4jGraphRAG:
         
         return docs
     
-    def qa_with_multimedia(self, query, min_similarity=0.65):
+    def qa_with_multimedia(self, query, min_similarity=0.7):
         """基于多媒體内容的問答
         
         Args:
@@ -874,3 +1123,340 @@ class Neo4jGraphRAG:
         final_answer = f"{answer}\n\n信息来源:\n" + "\n".join(sources_info)
         
         return final_answer
+
+    def get_all_images(self, limit=50):
+        """獲取數據庫中所有的圖片"""
+        if self.use_mock:
+            return self.mock_docs[:limit] if self.mock_docs else []
+        
+        try:
+            # 使用Cypher查詢獲取圖片內容
+            with self.driver.session(database=NEO4J_DATABASE) as session:
+                result = session.run("""
+                    MATCH (n:MultimediaContent)
+                    WHERE n.type = 'image' OR n.type = 'Image'
+                    RETURN n.id as id, n.description as description, 
+                           n.path as path, n.filename as filename,
+                           n.type as type, n.embedding as embedding
+                    LIMIT $limit
+                """, limit=limit).data()
+            
+            # 將結果轉換為Document對象
+            docs = []
+            for item in result:
+                # 創建Document對象
+                doc = Document(
+                    page_content=item.get("description", ""),
+                    metadata={
+                        "doc_id": item.get("id"),
+                        "path": item.get("path"),
+                        "filename": item.get("filename"),
+                        "type": item.get("type"),
+                        "embedding": np.array(item["embedding"]) if item.get("embedding") is not None else None 
+                    }
+                )
+                docs.append(doc)
+            
+            return docs
+        except Exception as e:
+            print(f"獲取圖片時發生錯誤: {e}")
+            return []
+            
+    def advanced_search(self, query, k=10, min_similarity=0.7):
+        """進階搜尋功能，結合標籤匹配、圖探索和向量相似度
+        
+        Args:
+            query: 查詢文本
+            k: 返回結果數量
+            min_similarity: 最低相似度閾值
+            
+        Returns:
+            List of Document objects with search metadata
+        """
+        if self.use_mock:
+            # 模擬模式下使用簡單搜尋
+            return self.search(query, k=k, min_similarity=min_similarity)
+            
+        # 解析查詢詞
+        query_words = [word.lower().strip() for word in query.split() if len(word.strip()) > 1]
+        
+        try:
+            with self.driver.session(database=NEO4J_DATABASE) as session:
+                # 步驟 1: 標籤匹配
+                print(f"步驟 1: 查詢標籤匹配 - 關鍵詞: {query_words}")
+                tags_result = session.run("""
+                    // 找出與查詢詞匹配的標籤
+                    MATCH (t:Tag)
+                    WHERE any(word IN $query_words WHERE toLower(t.name) CONTAINS word)
+                    RETURN t.id as tag_id, t.name as tag_name
+                """, {"query_words": query_words})
+                
+                matching_tags = [(record["tag_id"], record["tag_name"]) for record in tags_result]
+                print(f"找到匹配的標籤: {matching_tags}")
+                
+                # 如果找到匹配的標籤，查詢具有這些標籤的圖片
+                candidate_images = []
+                if matching_tags:
+                    tag_ids = [tag_id for tag_id, _ in matching_tags]
+                    images_with_tags_result = session.run("""
+                        // 查詢具有匹配標籤的圖片，並計算標籤匹配數量
+                        MATCH (img:MultimediaContent:Image)-[:HAS_TAG]->(t:Tag)
+                        WHERE t.id IN $tag_ids
+                        WITH img, count(DISTINCT t) as tag_match_count
+                        RETURN img.id as id, img.path as path, img.description as description, 
+                               img.filename as filename, 
+                               'TAG_MATCH' as match_type,
+                               tag_match_count,
+                               1.0 as initial_score
+                        ORDER BY tag_match_count DESC
+                    """, {"tag_ids": tag_ids})
+                    
+                    for record in images_with_tags_result:
+                        candidate_images.append({
+                            "id": record["id"],
+                            "path": record["path"],
+                            "description": record["description"],
+                            "filename": record["filename"],
+                            "match_type": record["match_type"],
+                            "tag_match_count": record["tag_match_count"],
+                            "score": record["initial_score"]
+                        })
+                    
+                    print(f"步驟 1: 找到 {len(candidate_images)} 個標籤匹配的圖片")
+                
+                # 步驟 2: 通過相似圖片關係擴展結果
+                if candidate_images:
+                    print("步驟 2: 擴展通過相似關係")
+                    seed_image_ids = [img["id"] for img in candidate_images]
+                    similar_images_result = session.run("""
+                        // 通過SIMILAR關係擴展結果
+                        MATCH (seed:MultimediaContent:Image)-[sim:SIMILAR]->(related:MultimediaContent:Image)
+                        WHERE seed.id IN $seed_ids
+                          AND sim.score >= $min_similarity
+                          AND NOT related.id IN $seed_ids
+                        
+                        // 取得相關圖片的標籤匹配計數
+                        OPTIONAL MATCH (related)-[:HAS_TAG]->(t:Tag)
+                        WHERE t.id IN $tag_ids
+                        
+                        WITH related, sim.score as similarity, count(DISTINCT t) as tag_match_count
+                        
+                        RETURN related.id as id, related.path as path, 
+                               related.description as description, 
+                               related.filename as filename,
+                               'SIMILAR_EXPAND' as match_type,
+                               tag_match_count,
+                               similarity as initial_score
+                        ORDER BY tag_match_count DESC, similarity DESC
+                    """, {
+                        "seed_ids": seed_image_ids,
+                        "tag_ids": tag_ids if matching_tags else [],
+                        "min_similarity": min_similarity
+                    })
+                    
+                    similar_images = []
+                    for record in similar_images_result:
+                        similar_images.append({
+                            "id": record["id"],
+                            "path": record["path"],
+                            "description": record["description"],
+                            "filename": record["filename"],
+                            "match_type": record["match_type"],
+                            "tag_match_count": record["tag_match_count"],
+                            "score": record["initial_score"]
+                        })
+                    
+                    print(f"步驟 2: 找到 {len(similar_images)} 個相似相關的圖片")
+                    candidate_images.extend(similar_images)
+                
+                # 步驟 3: 如果標籤匹配結果少，使用CLIP向量相似度
+                if len(candidate_images) < 10 or len(matching_tags) <= 1:
+                    print("步驟 3: 使用CLIP向量相似度進行查詢")
+                    # 使用CLIP對查詢文本進行編碼
+                    text_embedding = self.encoder.encode_text(query)
+                    
+                    # 查詢向量相似的圖片
+                    vector_query_result = session.run("""
+                        // 向量相似度查詢
+                        MATCH (node:MultimediaContent:Image)
+                        WHERE NOT node.id IN $existing_ids
+                        WITH node, 
+                             reduce(s = 0.0, i IN range(0, size(node.embedding)-1) | 
+                                s + node.embedding[i] * $embedding[i]) / 
+                             (sqrt(reduce(s = 0.0, x IN node.embedding | s + x * x)) * 
+                              sqrt(reduce(s = 0.0, x IN $embedding | s + x * x))) as score
+                        WHERE score >= $min_similarity
+                        
+                        // 獲取標籤匹配計數
+                        OPTIONAL MATCH (node)-[:HAS_TAG]->(t:Tag)
+                        WHERE t.id IN $tag_ids
+                        
+                        WITH node, score, count(DISTINCT t) as tag_match_count
+                        
+                        RETURN node.id as id, node.path as path, 
+                               node.description as description, 
+                               node.filename as filename,
+                               'VECTOR_MATCH' as match_type,
+                               tag_match_count,
+                               score as initial_score
+                        ORDER BY tag_match_count DESC, score DESC
+                        LIMIT 20
+                    """, {
+                        "embedding": text_embedding.tolist(),
+                        "existing_ids": [img["id"] for img in candidate_images],
+                        "tag_ids": tag_ids if matching_tags else [],
+                        "min_similarity": min_similarity
+                    })
+                    
+                    vector_matches = []
+                    for record in vector_query_result:
+                        vector_matches.append({
+                            "id": record["id"],
+                            "path": record["path"],
+                            "description": record["description"],
+                            "filename": record["filename"],
+                            "match_type": record["match_type"],
+                            "tag_match_count": record["tag_match_count"],
+                            "score": record["initial_score"]
+                        })
+                    
+                    print(f"步驟 3: 找到 {len(vector_matches)} 個向量相似的圖片")
+                    candidate_images.extend(vector_matches)
+                
+                # 步驟 4: 如果結果仍然不足，使用相關標籤擴展
+                if len(candidate_images) < 10 and matching_tags:
+                    print("步驟 4: 使用相關標籤擴展結果")
+                    
+                    related_tags_result = session.run("""
+                        // 查詢與已匹配標籤相關的標籤
+                        MATCH (t:Tag)-[:RELATED_TO]-(related_tag:Tag)
+                        WHERE t.id IN $tag_ids
+                          AND NOT related_tag.id IN $tag_ids
+                        RETURN DISTINCT related_tag.id as tag_id, related_tag.name as tag_name
+                    """, {"tag_ids": tag_ids})
+                    
+                    related_tag_ids = [record["tag_id"] for record in related_tags_result]
+                    print(f"找到相關標籤: {related_tag_ids}")
+                    
+                    if related_tag_ids:
+                        related_tag_images_result = session.run("""
+                            // 查詢具有相關標籤的圖片
+                            MATCH (img:MultimediaContent:Image)-[:HAS_TAG]->(t:Tag)
+                            WHERE t.id IN $related_tag_ids
+                              AND NOT img.id IN $existing_ids
+                            
+                            WITH img, count(DISTINCT t) as related_tag_count
+                            
+                            RETURN img.id as id, img.path as path, 
+                                   img.description as description, 
+                                   img.filename as filename,
+                                   'RELATED_TAG' as match_type,
+                                   0 as tag_match_count,
+                                   0.7 as initial_score
+                            ORDER BY related_tag_count DESC
+                            LIMIT 10
+                        """, {
+                            "related_tag_ids": related_tag_ids,
+                            "existing_ids": [img["id"] for img in candidate_images]
+                        })
+                        
+                        related_tag_images = []
+                        for record in related_tag_images_result:
+                            related_tag_images.append({
+                                "id": record["id"],
+                                "path": record["path"],
+                                "description": record["description"],
+                                "filename": record["filename"],
+                                "match_type": record["match_type"],
+                                "tag_match_count": record["tag_match_count"],
+                                "score": record["initial_score"]
+                            })
+                        
+                        print(f"步驟 4: 找到 {len(related_tag_images)} 個相關標籤的圖片")
+                        candidate_images.extend(related_tag_images)
+                
+                # 步驟 5: 計算描述文本與查詢的相似度，調整分數
+                print("步驟 5: 根據描述相似度調整分數")
+                
+                for image in candidate_images:
+                    description = image.get("description", "").lower()
+                    if not description:
+                        continue
+                        
+                    # 計算關鍵詞匹配
+                    keyword_matches = sum(1 for word in query_words if word in description)
+                    
+                    # 調整分數
+                    if keyword_matches > 0:
+                        # 關鍵詞匹配分數加成 (最多加成 0.1)
+                        keyword_bonus = min(0.1, 0.02 * keyword_matches)
+                        image["score"] += keyword_bonus
+                        image["description_match"] = True
+                        image["keyword_matches"] = keyword_matches
+                
+                # 步驟 6: 最終結果排序與組裝
+                print("步驟 6: 組合最終結果")
+                
+                # 按標籤匹配數和分數排序
+                sorted_candidates = sorted(
+                    candidate_images, 
+                    key=lambda x: (x.get("tag_match_count", 0), x.get("score", 0)), 
+                    reverse=True
+                )
+                
+                # 限制結果數量
+                top_results = sorted_candidates[:k]
+                
+                # 轉換為Document對象
+                result_docs = []
+                for result in top_results:
+                    doc_id = result["id"]
+                    
+                    # 查找文檔存儲中是否有該文檔
+                    stored_doc = None
+                    try:
+                        stored_doc = self.doc_store.mget([doc_id])[0]
+                    except:
+                        pass
+                    
+                    if stored_doc:
+                        # 更新現有文檔的元數據
+                        stored_doc.metadata.update({
+                            "score": result["score"],
+                            "match_type": result["match_type"],
+                            "tag_match_count": result["tag_match_count"],
+                            "description_match": result.get("description_match", False),
+                            "keyword_matches": result.get("keyword_matches", 0)
+                        })
+                        result_docs.append(stored_doc)
+                    else:
+                        # 創建新的Document對象
+                        metadata = {
+                            "doc_id": doc_id,
+                            "type": "image",
+                            "path": result["path"],
+                            "filename": result["filename"],
+                            "score": result["score"],
+                            "match_type": result["match_type"],
+                            "tag_match_count": result["tag_match_count"],
+                            "description_match": result.get("description_match", False),
+                            "keyword_matches": result.get("keyword_matches", 0)
+                        }
+                        
+                        doc = Document(
+                            page_content=result["description"] or f"Image: {result['filename']}",
+                            metadata=metadata
+                        )
+                        result_docs.append(doc)
+                
+                print(f"最終找到 {len(result_docs)} 個結果")
+                return result_docs
+        
+        except Exception as e:
+            print(f"進階搜尋執行時發生錯誤: {e}")
+            # 回退到基本搜尋
+            print("回退到基本搜尋方法")
+            return self.search(query, k=k, min_similarity=min_similarity)
+
+    def __del__(self):
+        """清理連接"""

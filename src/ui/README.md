@@ -27,13 +27,13 @@ pillow>=10.0.0
 2. 運行啟動腳本：
 
 ```bash
-python run_app.py
+python run_ui.py
 ```
 
 或者帶參數運行：
 
 ```bash
-python run_app.py --share --debug
+python run_ui.py --share --debug
 ```
 
 參數說明：

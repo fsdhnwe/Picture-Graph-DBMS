@@ -48,7 +48,7 @@ class MultiModalEncoder:
             return None
     
     def encode_text(self, text):
-        """使用CLIP模型将文本编码为向量表示"""
+        """使用CLIP模型将文本編碼為向量表示"""
         try:
             # 使用CLIP处理器处理文本
             inputs = self.clip_processor(text=text, return_tensors="pt", padding=True, truncation=True)
@@ -61,6 +61,12 @@ class MultiModalEncoder:
             text_embedding = text_features.squeeze().cpu().numpy()
             # 标准化向量
             text_embedding = text_embedding / np.linalg.norm(text_embedding)
+
+            # 打印查詢文字的嵌入向量
+            # print(f"\n搜尋查詢 '{text}' 的嵌入向量:")
+            # print(f"維度: {text_embedding.shape}")
+            # print(f"嵌入向量: {text_embedding.tolist()}")
+            # print(f"嵌入向量範數: {np.linalg.norm(text_embedding)}")
             
             return text_embedding
         except Exception as e:
