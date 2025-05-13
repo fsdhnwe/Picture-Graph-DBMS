@@ -1,8 +1,10 @@
 import os
 import configparser
 
-# 取得 config.ini 路徑（假設和 config.py 同目錄）
-config_path = os.path.join(os.path.dirname(__file__), 'config.ini')
+# 取得專案根目錄
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# 組合 config.ini 的路徑
+config_path = os.path.join(BASE_DIR, 'config', 'config.ini')
 
 config = configparser.ConfigParser()
 config.read(config_path, encoding='utf-8')

@@ -1,5 +1,5 @@
 
-# Picture-Graph-RAG
+# Picture-Graph-DBMS
 
 基於 Neo4j 圖資料庫與多模態檢索的圖片知識檢索系統。
 
@@ -8,8 +8,8 @@
 ### 1. Clone 本專案
 
 ```bash
-git clone https://github.com/fsdhnwe/Picture-Graph-RAG.git
-cd Picture-Graph-RAG
+git clone https://github.com/fsdhnwe/Picture-Graph-DBMS.git
+cd Picture-Graph-DBMS
 ```
 
 ---
@@ -28,8 +28,8 @@ source .venv/bin/activate      # Linux/macOS
 
 使用 conda：
 ```bash
-conda create -n picrag python=3.10
-conda activate picrag
+conda create -n picGraphDBMS python=3.10
+conda activate picGraphDBMS
 ```
 
 ---
