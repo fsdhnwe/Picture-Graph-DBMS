@@ -18,9 +18,7 @@ setup(
         "sentence-transformers>=2.2.0",
         "llama-cpp-python>=0.2.0",
     ],
-    author="what ever you want",
-    author_email="your.email@example.com",
-    description="A multimodal RAG system using Neo4j for image and video processing",
+    description="A multimodal system using Neo4j for image and video processing(not yet)",
     long_description=open("README.md").read(),
     long_description_content_type="text/markdown",
     url="https://github.com/fsdhnwe/Picture-Graph-RAG",
@@ -29,5 +27,5 @@ setup(
         "License :: OSI Approved :: MIT License",
         "Operating System :: OS Independent",
     ],
-    python_requires=">=3.8",
+    python_requires=">=3.10",
 )

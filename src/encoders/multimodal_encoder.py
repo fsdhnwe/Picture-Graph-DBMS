@@ -146,7 +146,7 @@ class MultiModalEncoder:
             print(f"Error processing YouTube video: {e}")
             return None, {}
     
-    def generate_text_description(self, image_path, llm=None):
+    def generate_text_description(self, image_path):
         """使用BLIP模型生成圖片描述"""
         try:
             from transformers import BlipProcessor, BlipForConditionalGeneration

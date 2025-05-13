@@ -23,6 +23,7 @@ class Neo4jGraphRAG:
         # 初始化LLM - 可以選擇本地模型或HuggingFace Hub上的模型
         if use_local_llm:
             try:
+                print(f"加载本地LLM")
                 # 嘗試使用本機LLM（需要預先下載模型）
                 self.llm = LlamaCpp(
                     model_path="llama-2-7b-chat.Q3_K_L.gguf",  # 替換為您本地模型的路徑
@@ -55,6 +56,7 @@ class Neo4jGraphRAG:
         else:
             # 使用HuggingFace Hub上的模型
             try:
+                print(f"无法加载本地HuggingFace模型，将使用HuggingFace Hub上的模型")
                 # 使用本地HuggingFace模型
                 model_name = "google/flan-t5-large"
                 tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -408,7 +410,7 @@ class Neo4jGraphRAG:
             
             # 如果LLM可用，嘗試生成更好的描述
             try:
-                llm_description = self.encoder.generate_text_description(image_path, self.llm)
+                llm_description = self.encoder.generate_text_description(image_path)
                 if llm_description and len(llm_description) > 10:
                     description = llm_description
             except Exception as e:
@@ -516,7 +518,7 @@ class Neo4jGraphRAG:
                     MATCH (existing:MultimediaContent:Image)
                     WHERE existing.id <> $image_id AND existing.embedding IS NOT NULL
                     WITH new, existing, 
-                         apoc.text.distance.cosine(new.embedding, existing.embedding) AS similarity
+                         apoc.math.cosineSimilarity(new.embedding, existing.embedding) AS similarity
                     WHERE similarity >= 0.75
                     RETURN existing.id AS id, similarity AS score
                     ORDER BY similarity DESC

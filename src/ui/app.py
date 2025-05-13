@@ -21,7 +21,15 @@ current_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # 獲
 project_root = os.path.dirname(current_dir)  # 獲取項目根目錄
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
-os.environ['GRADIO_TEMP_DIR'] = r"D:\pythonProject\img_neo4j\temp"
+
+# 取得當前腳本(app.py)所在的目錄，然後向上移動一層到專案根目錄
+project_root = Path(__file__).parent.parent.absolute()
+# 構建 temp 資料夾的絕對路徑
+temp_dir = project_root / "temp"
+# 設定環境變數
+os.environ['GRADIO_TEMP_DIR'] = str(temp_dir)
+# 確保 temp 資料夾存在
+temp_dir.mkdir(exist_ok=True)
 
 # 使用絕對路徑導入
 from src.database.neo4j_graph_rag import Neo4jGraphRAG
@@ -97,7 +105,7 @@ class ImageDatabaseUI:
         timestamp = int(time.time())
         
         try:
-            if isinstance(image, str):  # 已經是路徑了
+            if isinstance(image, str):
                 image_path = image
                 extension = os.path.splitext(image_path)[1]
                 save_path = os.path.join(self.image_dir, f"image_{timestamp}{extension}")
@@ -607,8 +615,6 @@ CLIP 是一個在極大規模、多領域資料上訓練的模型，設計目的
             self.current_gallery_images = result_docs # 或者儲存其他你需要的信息
 
             result_text = f"顯示 {len(gallery_items)} 張圖片"
-            if selected_tags and len(selected_tags) > 0:
-                result_text += f"（標籤篩選: {', '.join(selected_tags)}）"
 
             # *** 返回 PIL 物件列表給 Gallery ***
             # Gallery 會自動處理 (PIL Image, caption) 的元組
@@ -645,7 +651,7 @@ CLIP 是一個在極大規模、多領域資料上訓練的模型，設計目的
         # 添加其他元數據
         details += "**其他信息:**\n\n"
         for key, value in doc.metadata.items():
-            if key not in ["doc_id", "type", "path", "filename"]:
+            if key not in ["doc_id", "type", "path", "filename", "embedding"]:
                 details += f"- {key}: {value}\n"
         
         # 查找相似圖片
