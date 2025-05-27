@@ -241,129 +241,6 @@ class Neo4jGraphRAG:
                 except Exception as e2:
                     print(f"尝试创建索引时出错: {e2}")
     
-    def create_or_get_tag(self, tag_name):
-        """創建標籤節點，如果已存在則返回現有節點ID"""
-        if self.use_mock:
-            # 模擬模式
-            tag_id = f"tag_{tag_name.lower().replace(' ', '_')}"
-            exists = False
-            for doc in self.mock_docs:
-                if doc.get("type") == "tag" and doc.get("name") == tag_name:
-                    exists = True
-                    return doc.get("id")
-            
-            if not exists:
-                self.mock_docs.append({
-                    "id": tag_id,
-                    "type": "tag",
-                    "name": tag_name
-                })
-            return tag_id
-        
-        try:
-            with self.driver.session(database=NEO4J_DATABASE) as session:
-                # 檢查標籤是否已存在
-                result = session.run("""
-                    MATCH (t:Tag {name: $name})
-                    RETURN t.id as id
-                """, {"name": tag_name})
-                
-                record = result.single()
-                if record:
-                    # 標籤已存在，返回ID
-                    return record["id"]
-                
-                # 標籤不存在，創建新標籤
-                tag_id = f"tag_{tag_name.lower().replace(' ', '_')}"
-                session.run("""
-                    CREATE (t:Tag {
-                        id: $id,
-                        name: $name,
-                        created_at: datetime()
-                    })
-                    RETURN t
-                """, {
-                    "id": tag_id,
-                    "name": tag_name
-                })
-                
-                return tag_id
-        except Exception as e:
-            print(f"創建標籤時發生錯誤: {e}")
-            return None
-    
-    def add_tag_to_image(self, image_id, tag_name):
-        """將標籤添加到圖片"""
-        # 獲取或創建標籤節點
-        tag_id = self.create_or_get_tag(tag_name)
-        if not tag_id:
-            return False
-        
-        if self.use_mock:
-            print(f"模擬添加標籤: {image_id} -> HAS_TAG -> {tag_id}")
-            return True
-        
-        try:
-            with self.driver.session(database=NEO4J_DATABASE) as session:
-                # 創建圖片與標籤之間的關係
-                session.run("""
-                    MATCH (i:MultimediaContent:Image {id: $image_id})
-                    MATCH (t:Tag {id: $tag_id})
-                    MERGE (i)-[r:HAS_TAG]->(t)
-                    RETURN r
-                """, {
-                    "image_id": image_id,
-                    "tag_id": tag_id
-                })
-                
-                return True
-        except Exception as e:
-            print(f"添加標籤到圖片時發生錯誤: {e}")
-            return False
-    
-    def get_all_tags(self):
-        """獲取所有標籤"""
-        if self.use_mock:
-            tags = []
-            for doc in self.mock_docs:
-                if doc.get("type") == "tag":
-                    tags.append({"id": doc.get("id"), "name": doc.get("name")})
-            return tags
-        
-        try:
-            with self.driver.session(database=NEO4J_DATABASE) as session:
-                result = session.run("""
-                    MATCH (t:Tag)
-                    RETURN t.id as id, t.name as name
-                    ORDER BY t.name
-                """)
-                
-                tags = [{"id": record["id"], "name": record["name"]} for record in result]
-                return tags
-        except Exception as e:
-            print(f"獲取標籤時發生錯誤: {e}")
-            return []
-    
-    def get_image_tags(self, image_id):
-        """獲取圖片的所有標籤"""
-        if self.use_mock:
-            # 模擬模式
-            return []
-        
-        try:
-            with self.driver.session(database=NEO4J_DATABASE) as session:
-                result = session.run("""
-                    MATCH (i:MultimediaContent:Image {id: $image_id})-[:HAS_TAG]->(t:Tag)
-                    RETURN t.id as id, t.name as name
-                    ORDER BY t.name
-                """, {"image_id": image_id})
-                
-                tags = [{"id": record["id"], "name": record["name"]} for record in result]
-                return tags
-        except Exception as e:
-            print(f"獲取圖片標籤時發生錯誤: {e}")
-            return []
-    
     def add_image(self, image_path, metadata=None, tags=None):
         """添加图片到图数据库，如果已存在則跳過"""
         if metadata is None:
@@ -388,10 +265,6 @@ class Neo4jGraphRAG:
                         existing_id = record["id"]
                         print(f"圖片 {image_basename} 已存在於數據庫中，ID: {existing_id}")
                         
-                        # 如果提供了標籤，添加到現有圖片
-                        if tags:
-                            for tag in tags:
-                                self.add_tag_to_image(existing_id, tag)
                         
                         return existing_id
             except Exception as e:
@@ -473,10 +346,7 @@ class Neo4jGraphRAG:
                                     SET n += $properties
                                 """, {"id": doc_id, "properties": valid_metadata})
                         
-                        # 添加標籤
-                        if tags:
-                            for tag in tags:
-                                self.add_tag_to_image(doc_id, tag)
+
                         
                         # 檢查與其他圖片的相似度，建立關係
                         self._check_and_create_similarity_relations(doc_id, image_embedding)

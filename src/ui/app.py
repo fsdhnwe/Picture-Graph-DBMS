@@ -52,117 +52,69 @@ class ImageDatabaseUI:
         
         # 畫廊結果暫存
         self.current_gallery_images = []
-        
-        # 初始化 YOLO 模型用於自動標記
-        try:
-            from ultralytics import YOLO
-            self.yolo_model = YOLO("yolov8n.pt")  # 加載小型 YOLOv8 模型
-            self.has_yolo = True
-            print("成功加載 YOLOv8 模型")
-        except Exception as e:
-            self.has_yolo = False
-            print(f"無法加載 YOLOv8 模型: {e}")
     
-    def auto_tag_image(self, image_path, max_tags=5):
-        """使用 YOLOv8 自動標記圖片中的物件"""
-        if not self.has_yolo:
-            return []
+    def upload_image(self, images, description=None):
+        """上傳多張圖片到資料庫
         
-        try:
-            # 執行目標檢測
-            results = self.yolo_model(image_path)
+        Args:
+            images: 可以是單張圖片或圖片列表
+            description: 圖片描述（可選）
             
-            # 獲取檢測到的類別名稱
-            detected_objects = {}
-            for r in results:
-                boxes = r.boxes
-                for box in boxes:
-                    cls_id = int(box.cls.item())
-                    conf = float(box.conf.item())
-                    cls_name = r.names[cls_id]
-                    
-                    # 只保留置信度高的檢測結果
-                    if conf > 0.4:  # 設置置信度閾值
-                        # 使用類別名稱作為鍵，存儲最高置信度
-                        if cls_name not in detected_objects or detected_objects[cls_name] < conf:
-                            detected_objects[cls_name] = conf
-            
-            # 按置信度排序並限制標籤數量
-            sorted_objects = sorted(detected_objects.items(), key=lambda x: x[1], reverse=True)
-            auto_tags = [cls_name for cls_name, _ in sorted_objects[:max_tags]]
-            
-            return auto_tags
-        except Exception as e:
-            print(f"自動標記圖片時發生錯誤: {e}")
-            return []
-    
-    def upload_image(self, image, description=None, selected_tags=None, new_tags=None, use_auto_tagging=True):
-        """上傳圖片到資料庫"""
-        if image is None:
-            return "請選擇圖片上傳", None, []
+        Returns:
+            tuple: (結果訊息, 圖片路徑列表)
+        """
+        if images is None:
+            return "請選擇圖片上傳", []
         
-        # 保存圖片到測試圖片目錄
+        # 確保 images 是列表
+        if not isinstance(images, list):
+            images = [images]
+            
+        results = []
+        saved_paths = []
         timestamp = int(time.time())
         
-        try:
-            if isinstance(image, str):
-                image_path = image
-                extension = os.path.splitext(image_path)[1]
-                save_path = os.path.join(self.image_dir, f"image_{timestamp}{extension}")
-                shutil.copy(image_path, save_path)
-            else:  # Gradio Image 對象 (可能是 PIL.Image 或其他格式)
-                if hasattr(image, 'save'):  # PIL.Image 對象
-                    extension = ".jpg"
-                    save_path = os.path.join(self.image_dir, f"image_{timestamp}{extension}")
-                    image.save(save_path)
-                elif hasattr(image, 'astype'):  # NumPy 陣列
-                    extension = ".jpg"
-                    save_path = os.path.join(self.image_dir, f"image_{timestamp}{extension}")
-                    pil_img = Image.fromarray(image.astype('uint8'))
-                    pil_img.save(save_path)
-                else:
-                    return f"不支援的圖片格式: {type(image)}", None, []
-            
-            # 準備標籤
-            all_tags = []
-            
-            # 添加自動標記的標籤
-            if use_auto_tagging and self.has_yolo:
-                auto_tags = self.auto_tag_image(save_path)
-                all_tags.extend(auto_tags)
-                print(f"自動標記標籤: {auto_tags}")
-            
-            # 添加選擇的現有標籤
-            if selected_tags and isinstance(selected_tags, list):
-                all_tags.extend(selected_tags)
-            
-            # 添加新輸入的標籤
-            if new_tags:
-                # 處理標籤字符串，支持逗號、分號或空格分隔
-                if isinstance(new_tags, str):
-                    # 替換標點符號為空格，然後分割
-                    new_tags = new_tags.replace(',', ' ').replace(';', ' ')
-                    tag_list = [tag.strip() for tag in new_tags.split() if tag.strip()]
-                    all_tags.extend(tag_list)
-            
-            # 去除重複
-            all_tags = list(set(all_tags))
-            
-            # 準備元數據
-            metadata = {}
-            if description:
-                metadata["user_description"] = description
-            
-            # 添加到資料庫
-            doc_id = self.db.add_image(save_path, metadata, all_tags)
-            
-            # 獲取所有標籤，包括數據庫中已有的
-            current_tags = self.db.get_image_tags(doc_id)
-            tag_names = [tag["name"] for tag in current_tags]
-            
-            return f"圖片上傳成功！ID: {doc_id}\n已添加標籤: {', '.join(all_tags)}", save_path, tag_names
-        except Exception as e:
-            return f"圖片上傳失敗: {str(e)}", None, []
+        for i, image in enumerate(images):
+            try:
+                if isinstance(image, str):
+                    image_path = image
+                    extension = os.path.splitext(image_path)[1]
+                    save_path = os.path.join(self.image_dir, f"image_{timestamp}_{i}{extension}")
+                    shutil.copy(image_path, save_path)
+                else:  # Gradio Image 對象
+                    if hasattr(image, 'save'):  # PIL.Image 對象
+                        extension = ".jpg"
+                        save_path = os.path.join(self.image_dir, f"image_{timestamp}_{i}{extension}")
+                        image.save(save_path)
+                    elif hasattr(image, 'astype'):  # NumPy 陣列
+                        extension = ".jpg"
+                        save_path = os.path.join(self.image_dir, f"image_{timestamp}_{i}{extension}")
+                        pil_img = Image.fromarray(image.astype('uint8'))
+                        pil_img.save(save_path)
+                    else:
+                        results.append(f"跳過圖片 {i+1}: 不支援的格式 {type(image)}")
+                        continue
+                
+                # 準備元數據
+                metadata = {}
+                if description:
+                    metadata["user_description"] = description
+                
+                # 添加到資料庫
+                doc_id = self.db.add_image(save_path, metadata, None)
+                saved_paths.append(save_path)
+                results.append(f"圖片 {i+1} 上傳成功！ID: {doc_id}")
+                
+            except Exception as e:
+                results.append(f"圖片 {i+1} 上傳失敗: {str(e)}")
+        
+        # 返回整體結果
+        if not saved_paths:
+            return "所有圖片上傳失敗！\n" + "\n".join(results), []
+        elif len(saved_paths) < len(images):
+            return f"部分圖片上傳成功 ({len(saved_paths)}/{len(images)})。\n" + "\n".join(results), saved_paths
+        else:
+            return f"所有圖片上傳成功！\n" + "\n".join(results), saved_paths
     
     def search_images(self, query, min_similarity=0.65):
         """搜尋相似圖片"""
@@ -311,17 +263,10 @@ class ImageDatabaseUI:
         doc = self.current_search_results[evt.index]
         doc_id = doc.metadata.get("doc_id")
         
-        # 獲取圖片標籤
-        tags = self.db.get_image_tags(doc_id)
-        tag_names = [tag["name"] for tag in tags]
-        
         # 構建詳情文本
         details = f"## 圖片詳情\n\n"
         details += f"**檔名:** {doc.metadata.get('filename', '未知')}\n\n"
         details += f"**描述:** {doc.page_content}\n\n"
-        
-        if tag_names:
-            details += f"**標籤:** {', '.join(tag_names)}\n\n"
         
         details += f"**相似度分數:** {doc.metadata.get('score', 0):.4f}\n\n"
         details += f"**原始分數:** {doc.metadata.get('original_score', 0):.4f}\n\n"
@@ -565,51 +510,32 @@ CLIP 是一個在極大規模、多領域資料上訓練的模型，設計目的
             print(f"生成搜尋t-SNE可視化時發生錯誤: {str(e)}\n{tb}")
             return None
     
-    def get_all_images_with_tags(self, selected_tags=None):
-        """獲取所有圖片，可選按標籤篩選"""
+    def get_all_images_with_tags(self, selected_tags=None): # Parameter selected_tags is no longer used
+        """獲取所有圖片""" # Removed ", 可選按標籤篩選"
         try:
             all_images = self.db.get_all_images(limit=500)
             result_docs = [] # 用來儲存原始 document 資料 (如果需要)
             gallery_items = [] # 包含 (PIL Image, title) 的列表
 
-            if not selected_tags or len(selected_tags) == 0:
-                for doc in all_images:
-                    path = doc.metadata.get("path")
-                    if path and os.path.exists(path):
-                        try:
-                            # *** 加入這行來確認路徑 ***
-                            img = Image.open(path)
-                            title = os.path.basename(path)
-                            gallery_items.append((img.copy(), title)) # 使用 copy() 避免關閉檔案問題
-                            result_docs.append(doc)
-                            img.close() # 關閉檔案釋放資源
-                        except Exception as e:
-                            print(f"無法加載圖片 {path}: {e}")
-                    elif path:
-                        # *** 加入這行來確認不存在的路徑 ***
-                        print(f"DEBUG: Path exists in metadata but not on disk: {path}")
-                    else:
-                        print("DEBUG: Path is None or empty in metadata.")
-            else:
-                for doc in all_images:
-                    doc_id = doc.metadata.get("doc_id")
-                    path = doc.metadata.get("path")
-                    if not path or not os.path.exists(path):
-                        continue
-
-                    image_tags = self.db.get_image_tags(doc_id)
-                    image_tag_names = [tag["name"] for tag in image_tags]
-
-                    if all(tag in image_tag_names for tag in selected_tags):
-                        try:
-                            # *** 直接加載圖片為 PIL 物件 ***
-                            img = Image.open(path)
-                            title = os.path.basename(path)
-                            gallery_items.append((img.copy(), title)) # 使用 copy()
-                            result_docs.append(doc)
-                            img.close() # 關閉檔案釋放資源
-                        except Exception as e:
-                            print(f"無法加載圖片 {path}: {e}")
+            # if not selected_tags or len(selected_tags) == 0: # Removed tag filtering
+            for doc in all_images:
+                path = doc.metadata.get("path")
+                if path and os.path.exists(path):
+                    try:
+                        # *** 加入這行來確認路徑 ***
+                        img = Image.open(path)
+                        title = os.path.basename(path)
+                        gallery_items.append((img.copy(), title)) # 使用 copy() 避免關閉檔案問題
+                        result_docs.append(doc)
+                        img.close() # 關閉檔案釋放資源
+                    except Exception as e:
+                        print(f"無法加載圖片 {path}: {e}")
+                elif path:
+                    # *** 加入這行來確認不存在的路徑 ***
+                    print(f"DEBUG: Path exists in metadata but not on disk: {path}")
+                else:
+                    print("DEBUG: Path is None or empty in metadata.")
+                            
 
             # 保存結果以便後續使用 (可能需要調整儲存的內容)
             self.current_gallery_images = result_docs # 或者儲存其他你需要的信息
@@ -622,7 +548,7 @@ CLIP 是一個在極大規模、多領域資料上訓練的模型，設計目的
 
         except Exception as e:
             tb = traceback.format_exc()
-            return f"獲取圖片時發生錯誤: {str(e)}\n{tb}", [], []
+            return f"獲取圖片時發生錯誤: {str(e)}\\n{tb}", [], []
     
     def get_gallery_image_details(self, evt: gr.SelectData, gallery):
         """當用戶在標籤畫廊中點擊圖片時顯示詳情"""
@@ -633,18 +559,11 @@ CLIP 是一個在極大規模、多領域資料上訓練的模型，設計目的
         doc = self.current_gallery_images[evt.index]
         doc_id = doc.metadata.get("doc_id")
         
-        # 獲取圖片標籤
-        tags = self.db.get_image_tags(doc_id)
-        tag_names = [tag["name"] for tag in tags]
-        
         # 構建詳情文本
         details = f"## 圖片詳情\n\n"
         details += f"**檔名:** {doc.metadata.get('filename', '未知')}\n\n"
         details += f"**ID:** {doc_id}\n\n"
         details += f"**描述:** {doc.page_content}\n\n"
-        
-        if tag_names:
-            details += f"**標籤:** {', '.join(tag_names)}\n\n"
         
         details += f"**路徑:** {doc.metadata.get('path', '未知')}\n\n"
         
@@ -751,65 +670,36 @@ CLIP 是一個在極大規模、多領域資料上訓練的模型，設計目的
                 with gr.TabItem("上傳圖片"):
                     with gr.Row():
                         with gr.Column(scale=2):
-                            upload_image = gr.Image(label="選擇圖片上傳", type="pil", image_mode="RGB")
+                            upload_image = gr.Files(label="選擇圖片上傳", file_count="multiple", file_types=["image"])
                             description = gr.Textbox(label="圖片描述（可選）", placeholder="請輸入圖片描述...")
-                            
-                            with gr.Row():
-                                use_auto_tagging = gr.Checkbox(label="使用AI自動標記", value=True)
-                            
-                            with gr.Accordion("標籤選項", open=True):
-                                tag_choices = gr.Dropdown(
-                                    label="選擇現有標籤", 
-                                    choices=[],
-                                    multiselect=True,
-                                    allow_custom_value=True
-                                )
-                                new_tags = gr.Textbox(
-                                    label="添加新標籤（用逗號、分號或空格分隔）", 
-                                    placeholder="例如: 風景, 山, 海..."
-                                )
-                                
-                                def update_tag_choices():
-                                    return gr.Dropdown(choices=self.get_all_tags_for_ui())
-                                
-                                refresh_tags_btn = gr.Button("刷新標籤列表", variant="secondary", size="sm")
-                                refresh_tags_btn.click(fn=update_tag_choices, outputs=tag_choices)
                             
                             upload_btn = gr.Button("上傳圖片", variant="primary")
                         
                         with gr.Column(scale=1):
                             upload_result = gr.Textbox(label="上傳結果", elem_id="upload_result")
-                            preview_image = gr.Image(label="預覽", type="filepath")
-                            current_tags = gr.Dataframe(
-                                headers=["標籤"],
-                                datatype=["str"],
-                                label="已添加標籤"
-                            )
+                            preview_gallery = gr.Gallery(label="預覽", columns=2, height=300)
                             
+
                     # 顯示詳細的錯誤信息（如果有）
                     error_box = gr.Markdown(visible=False, elem_id="error_box")
                     
-                    def handle_upload(image, description, tag_choices, new_tags, use_auto_tagging):
-                        selected_tags = tag_choices if isinstance(tag_choices, list) else []
-                        result, path, tag_names = self.upload_image(
-                            image, description, selected_tags, new_tags, use_auto_tagging
+                    def handle_upload(images, description):
+                        result, paths = self.upload_image(
+                            images, description
                         )
                         
-                        # 準備標籤表格
-                        tags_df = [[tag] for tag in tag_names] if tag_names else []
-                        
                         if "失敗" in result:
-                            return result, path, tags_df, result, "visible", update_tag_choices()
-                        return result, path, tags_df, "", "hidden", update_tag_choices()
+                            return result, [], result, "visible"
+                        return result, paths, "", "hidden"
                     
                     upload_btn.click(
                         fn=handle_upload,
-                        inputs=[upload_image, description, tag_choices, new_tags, use_auto_tagging],
-                        outputs=[upload_result, preview_image, current_tags, error_box, error_box, tag_choices]
+                        inputs=[upload_image, description],
+                        outputs=[upload_result, preview_gallery, error_box, error_box]
                     )
                     
                     # 頁面載入時更新標籤列表
-                    demo.load(fn=self.get_all_tags_for_ui, outputs=tag_choices)
+                    # demo.load(fn=self.get_all_tags_for_ui, outputs=tag_choices)
                 
                 # 搜尋頁面
                 with gr.TabItem("搜尋圖片"):
@@ -862,11 +752,7 @@ CLIP 是一個在極大規模、多領域資料上訓練的模型，設計目的
                 with gr.TabItem("標籤畫廊"):
                     with gr.Row():
                         with gr.Column(scale=1):
-                            gallery_tag_choices = gr.Dropdown(
-                                label="按標籤篩選（選擇多個標籤為AND關係）", 
-                                choices=self.get_all_tags_for_ui(),
-                                multiselect=True
-                            )
+
                             
                             refresh_gallery_btn = gr.Button("刷新畫廊", variant="primary")
                             gallery_result = gr.Textbox(label="結果")
@@ -905,7 +791,7 @@ CLIP 是一個在極大規模、多領域資料上訓練的模型，設計目的
                     # 刷新畫廊按鈕事件
                     refresh_gallery_btn.click(
                         fn=self.get_all_images_with_tags,
-                        inputs=[gallery_tag_choices],
+                        inputs=None,  # Removed gallery_tag_choices
                         outputs=[gallery_result, all_images_gallery]
                     )
                     
@@ -968,13 +854,3 @@ CLIP 是一個在極大規模、多領域資料上訓練的模型，設計目的
                 shutil.rmtree(self.temp_dir)
         except Exception as e:
             print(f"清理臨時檔案時發生錯誤: {e}")
-
-    def get_all_tags_for_ui(self):
-        """獲取所有標籤供UI選擇"""
-        tags = self.db.get_all_tags()
-        return [tag["name"] for tag in tags]
-
-
-if __name__ == "__main__":
-    app = ImageDatabaseUI()
-    app.launch(debug=True) 
