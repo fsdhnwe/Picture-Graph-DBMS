@@ -16,20 +16,6 @@ import tempfile
 import uuid
 import traceback
 
-# 添加項目根目錄到 Python 路徑
-current_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # 獲取 src 目錄
-project_root = os.path.dirname(current_dir)  # 獲取項目根目錄
-if project_root not in sys.path:
-    sys.path.insert(0, project_root)
-
-# 取得當前腳本(app.py)所在的目錄，然後向上移動一層到專案根目錄
-project_root = Path(__file__).parent.parent.absolute()
-# 構建 temp 資料夾的絕對路徑
-temp_dir = project_root / "temp"
-# 設定環境變數
-os.environ['GRADIO_TEMP_DIR'] = str(temp_dir)
-# 確保 temp 資料夾存在
-temp_dir.mkdir(exist_ok=True)
 
 # 使用絕對路徑導入
 from src.database.neo4j_graph_rag import Neo4jGraphRAG
@@ -44,8 +30,11 @@ class ImageDatabaseUI:
         self.temp_dir = tempfile.mkdtemp()
         
         # 圖片儲存路徑
-        self.image_dir = os.path.join(os.getcwd(), "test_images")
+        self.image_dir = os.path.join(os.getcwd(), "images")
         os.makedirs(self.image_dir, exist_ok=True)
+        # 影片儲存路徑
+        self.video_dir = os.path.join(os.getcwd(), "videos")
+        os.makedirs(self.video_dir, exist_ok=True)
         
         # 搜尋結果暫存
         self.current_search_results = []
@@ -53,68 +42,70 @@ class ImageDatabaseUI:
         # 畫廊結果暫存
         self.current_gallery_images = []
     
-    def upload_image(self, images, description=None):
-        """上傳多張圖片到資料庫
+    def upload_files(self, files, description=None):
+        """上傳多張圖片或影片到資料庫
         
         Args:
-            images: 可以是單張圖片或圖片列表
-            description: 圖片描述（可選）
+            files: Gradio File objects (list)
+            description: 檔案描述（可選）
             
         Returns:
-            tuple: (結果訊息, 圖片路徑列表)
+            tuple: (結果訊息, 檔案路徑列表)
         """
-        if images is None:
-            return "請選擇圖片上傳", []
-        
-        # 確保 images 是列表
-        if not isinstance(images, list):
-            images = [images]
+        if not files:
+            return "請選擇檔案上傳", []
             
         results = []
-        saved_paths = []
+        saved_media_paths = [] # To store paths for gallery preview
         timestamp = int(time.time())
         
-        for i, image in enumerate(images):
+        for i, file_obj in enumerate(files):
             try:
-                if isinstance(image, str):
-                    image_path = image
-                    extension = os.path.splitext(image_path)[1]
-                    save_path = os.path.join(self.image_dir, f"image_{timestamp}_{i}{extension}")
-                    shutil.copy(image_path, save_path)
-                else:  # Gradio Image 對象
-                    if hasattr(image, 'save'):  # PIL.Image 對象
-                        extension = ".jpg"
-                        save_path = os.path.join(self.image_dir, f"image_{timestamp}_{i}{extension}")
-                        image.save(save_path)
-                    elif hasattr(image, 'astype'):  # NumPy 陣列
-                        extension = ".jpg"
-                        save_path = os.path.join(self.image_dir, f"image_{timestamp}_{i}{extension}")
-                        pil_img = Image.fromarray(image.astype('uint8'))
-                        pil_img.save(save_path)
-                    else:
-                        results.append(f"跳過圖片 {i+1}: 不支援的格式 {type(image)}")
-                        continue
+                original_filename = os.path.basename(file_obj.name) # Gradio provides temp path in file_obj.name
+                extension = os.path.splitext(original_filename)[1].lower()
                 
-                # 準備元數據
+                # 根據副檔名決定存放資料夾
+                if extension in ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff']:
+                    save_dir = self.image_dir
+                elif extension in ['.mp4', '.mov', '.avi', '.mkv', '.webm']:
+                    save_dir = self.video_dir
+                else:
+                    save_dir = self.image_dir  # 預設仍存圖片資料夾
+
+                save_path = os.path.join(save_dir, f"media_{timestamp}_{i}{extension}")
+                
+                # Copy the uploaded file from its temporary location to the save_path
+                shutil.copy(file_obj.name, save_path)
+
                 metadata = {}
                 if description:
                     metadata["user_description"] = description
                 
-                # 添加到資料庫
-                doc_id = self.db.add_image(save_path, metadata, None)
-                saved_paths.append(save_path)
-                results.append(f"圖片 {i+1} 上傳成功！ID: {doc_id}")
+                doc_id = None
+                if extension in ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff']:
+                    doc_id = self.db.add_image(save_path, metadata, None)
+                    results.append(f"圖片 {original_filename} 上傳成功！ID: {doc_id}")
+                elif extension in ['.mp4', '.mov', '.avi', '.mkv', '.webm']:
+                    # Assuming you have an add_video method similar to add_image
+                    doc_id = self.db.add_video(save_path, metadata) 
+                    results.append(f"影片 {original_filename} 上傳成功！ID: {doc_id}")
+                else:
+                    results.append(f"檔案 {original_filename}: 不支援的格式 {extension}")
+                    os.remove(save_path) # Remove unsupported file
+                    continue
+                
+                if doc_id:
+                    saved_media_paths.append(save_path)
                 
             except Exception as e:
-                results.append(f"圖片 {i+1} 上傳失敗: {str(e)}")
+                results.append(f"檔案 {original_filename} 上傳失敗: {str(e)}")
         
-        # 返回整體結果
-        if not saved_paths:
-            return "所有圖片上傳失敗！\n" + "\n".join(results), []
-        elif len(saved_paths) < len(images):
-            return f"部分圖片上傳成功 ({len(saved_paths)}/{len(images)})。\n" + "\n".join(results), saved_paths
+        if not saved_media_paths:
+            return "所有檔案上傳失敗！\\n" + "\\n".join(results), []
+        elif len(saved_media_paths) < len(files):
+            return f"部分檔案上傳成功 ({len(saved_media_paths)}/{len(files)})。\\n" + "\\n".join(results), saved_media_paths
         else:
-            return f"所有圖片上傳成功！\n" + "\n".join(results), saved_paths
+            return f"所有檔案上傳成功！\\n" + "\\n".join(results), saved_media_paths
     
     def search_images(self, query, min_similarity=0.65):
         """搜尋相似圖片"""
@@ -510,28 +501,34 @@ CLIP 是一個在極大規模、多領域資料上訓練的模型，設計目的
             print(f"生成搜尋t-SNE可視化時發生錯誤: {str(e)}\n{tb}")
             return None
     
-    def get_all_images_with_tags(self, selected_tags=None): # Parameter selected_tags is no longer used
-        """獲取所有圖片""" # Removed ", 可選按標籤篩選"
+    def get_all_media(self, media_type="圖片"): 
+        """獲取所有圖片或影片"""
         try:
-            all_images = self.db.get_all_images(limit=500)
-            result_docs = [] # 用來儲存原始 document 資料 (如果需要)
-            gallery_items = [] # 包含 (PIL Image, title) 的列表
+            items = []
+            if media_type == "圖片":
+                items = self.db.get_all_images(limit=500)
+            elif media_type == "影片":
+                items = self.db.get_all_videos(limit=500)
 
-            # if not selected_tags or len(selected_tags) == 0: # Removed tag filtering
-            for doc in all_images:
+            result_docs = [] 
+            gallery_items = [] 
+
+            for doc in items:
                 path = doc.metadata.get("path")
                 if path and os.path.exists(path):
                     try:
-                        # *** 加入這行來確認路徑 ***
-                        img = Image.open(path)
-                        title = os.path.basename(path)
-                        gallery_items.append((img.copy(), title)) # 使用 copy() 避免關閉檔案問題
+                        title = doc.page_content or doc.metadata.get('description') or os.path.basename(path)
+                        if media_type == "圖片":
+                            img = Image.open(path)
+                            gallery_items.append((path, title)) 
+                            img.close() 
+                        elif media_type == "影片":
+                            # For videos, Gallery can take file paths directly
+                            gallery_items.append((path, title)) 
                         result_docs.append(doc)
-                        img.close() # 關閉檔案釋放資源
                     except Exception as e:
-                        print(f"無法加載圖片 {path}: {e}")
+                        print(f"無法加載媒體 {path}: {e}")
                 elif path:
-                    # *** 加入這行來確認不存在的路徑 ***
                     print(f"DEBUG: Path exists in metadata but not on disk: {path}")
                 else:
                     print("DEBUG: Path is None or empty in metadata.")
@@ -540,37 +537,37 @@ CLIP 是一個在極大規模、多領域資料上訓練的模型，設計目的
             # 保存結果以便後續使用 (可能需要調整儲存的內容)
             self.current_gallery_images = result_docs # 或者儲存其他你需要的信息
 
-            result_text = f"顯示 {len(gallery_items)} 張圖片"
+            result_text = f"顯示 {len(gallery_items)} 個{media_type}"
 
-            # *** 返回 PIL 物件列表給 Gallery ***
-            # Gallery 會自動處理 (PIL Image, caption) 的元組
-            return result_text, gallery_items, [item[1] for item in gallery_items] # 第三個返回值是圖片標題列表
+            # For images, gallery_items are (PIL.Image, title)
+            # For videos, gallery_items are (filepath, title)
+            # Gradio Gallery handles both.
+            return result_text, gallery_items
 
         except Exception as e:
             tb = traceback.format_exc()
-            return f"獲取圖片時發生錯誤: {str(e)}\\n{tb}", [], []
-    
-    def get_gallery_image_details(self, evt: gr.SelectData, gallery):
-        """當用戶在標籤畫廊中點擊圖片時顯示詳情"""
+            return f"獲取{media_type}時發生錯誤: {str(e)}\\n{tb}", []
+
+    def get_gallery_item_details(self, evt: gr.SelectData, gallery):
+        """當用戶在標籤畫廊中點擊媒體時顯示詳情"""
         if not self.current_gallery_images or evt.index >= len(self.current_gallery_images):
-            return "無法獲取圖片詳情", [], []
+            return "無法獲取媒體詳情", [], []
         
-        # 獲取對應的文檔
         doc = self.current_gallery_images[evt.index]
-        doc_id = doc.metadata.get("doc_id")
-        
-        # 構建詳情文本
-        details = f"## 圖片詳情\n\n"
-        details += f"**檔名:** {doc.metadata.get('filename', '未知')}\n\n"
+        doc_id = doc.metadata.get("id")
+        media_type = doc.metadata.get("type", "未知類型") # image or video
+
+        details = f"## {media_type.capitalize()} 詳情\n\n"
+        details += f"**檔名/標題:** {doc.metadata.get('filename') or doc.metadata.get('title', '未知')}\n\n"
         details += f"**ID:** {doc_id}\n\n"
-        details += f"**描述:** {doc.page_content}\n\n"
         
+        description = doc.page_content or doc.metadata.get('description', '')
+        details += f"**描述:** {description}\n\n"
         details += f"**路徑:** {doc.metadata.get('path', '未知')}\n\n"
         
-        # 添加其他元數據
         details += "**其他信息:**\n\n"
         for key, value in doc.metadata.items():
-            if key not in ["doc_id", "type", "path", "filename", "embedding"]:
+            if key not in ["id", "type", "path", "filename", "title", "embedding", "description"]:
                 details += f"- {key}: {value}\n"
         
         # 查找相似圖片
@@ -591,10 +588,9 @@ CLIP 是一個在極大規模、多領域資料上訓練的模型，設計目的
                     if path and os.path.exists(path):
                         # 加載為PIL圖片對象
                         try:
-                            cache_path = self.copy_to_gradio_tmp(path)
-                            print("Gallery paths:", cache_path)
+                            print("Gallery paths:", path)
                             title = f"{os.path.basename(path)} (相似度: {record['similarity']:.4f})"
-                            similar_gallery_images.append((cache_path, title))
+                            similar_gallery_images.append((path, title))
                         except Exception as e:
                             print(f"無法加載相似圖片 {path}: {e}")
             
@@ -648,18 +644,6 @@ CLIP 是一個在極大規模、多領域資料上訓練的模型，設計目的
             tb = traceback.format_exc()
             return f"刪除圖片時發生錯誤: {str(e)}\n{tb}"
         
-    def copy_to_gradio_tmp(self, src_path):
-        """將圖片複製到 Gradio 快取資料夾，回傳新路徑"""
-        if not os.path.exists(src_path):
-            return None
-        # 直接用 GRADIO_TEMP_DIR
-        cache_dir = os.environ.get('GRADIO_TEMP_DIR', os.path.join(tempfile.gettempdir(), "gradio"))
-        os.makedirs(cache_dir, exist_ok=True)
-        ext = os.path.splitext(src_path)[1]
-        dst_path = os.path.join(cache_dir, f"{uuid.uuid4().hex}{ext}")
-        shutil.copy(src_path, dst_path)
-        return dst_path
-    
     def build_ui(self):
         """構建 Gradio 介面"""
         with gr.Blocks(title="多媒體圖像搜尋系統", theme=gr.themes.Soft(primary_hue="blue")) as demo:
@@ -667,40 +651,44 @@ CLIP 是一個在極大規模、多領域資料上訓練的模型，設計目的
             
             with gr.Tabs():
                 # 上傳頁面
-                with gr.TabItem("上傳圖片"):
+                with gr.TabItem("上傳圖片/影片"): # Changed tab name
                     with gr.Row():
                         with gr.Column(scale=2):
-                            upload_image = gr.Files(label="選擇圖片上傳", file_count="multiple", file_types=["image"])
-                            description = gr.Textbox(label="圖片描述（可選）", placeholder="請輸入圖片描述...")
+                            upload_files_component = gr.Files(label="選擇圖片或影片上傳", file_count="multiple", file_types=["image", "video"])
+                            description_input = gr.Textbox(label="檔案描述（可選）", placeholder="請輸入檔案描述...")
                             
-                            upload_btn = gr.Button("上傳圖片", variant="primary")
+                            upload_btn = gr.Button("上傳檔案", variant="primary")
                         
                         with gr.Column(scale=1):
-                            upload_result = gr.Textbox(label="上傳結果", elem_id="upload_result")
-                            preview_gallery = gr.Gallery(label="預覽", columns=2, height=300)
+                            upload_result_text = gr.Textbox(label="上傳結果", elem_id="upload_result")
+                            preview_gallery_component = gr.Gallery(label="預覽", columns=2, height=300)
                             
 
                     # 顯示詳細的錯誤信息（如果有）
                     error_box = gr.Markdown(visible=False, elem_id="error_box")
                     
-                    def handle_upload(images, description):
-                        result, paths = self.upload_image(
-                            images, description
-                        )
+                    def handle_upload_files(files, description): # Renamed function and params
+                        result, paths = self.upload_files(files, description) # Call new method
                         
-                        if "失敗" in result:
-                            return result, [], result, "visible"
-                        return result, paths, "", "hidden"
+                        # Preview gallery expects list of (data, caption) or just data.
+                        # For local files (images/videos), paths should work.
+                        preview_items = []
+                        if paths:
+                            for p in paths:
+                                preview_items.append((p, os.path.basename(p)))
+
+                        if "失敗" in result or not paths:
+                            # If paths is empty but result indicates partial success, it's an issue.
+                            # For simplicity, if any failure or no paths, show error.
+                            return result, [], result, gr.Markdown(visible=True)
+                        return result, preview_items, "", gr.Markdown(visible=False)
                     
                     upload_btn.click(
-                        fn=handle_upload,
-                        inputs=[upload_image, description],
-                        outputs=[upload_result, preview_gallery, error_box, error_box]
+                        fn=handle_upload_files,
+                        inputs=[upload_files_component, description_input],
+                        outputs=[upload_result_text, preview_gallery_component, error_box, error_box] # error_box output needs to be a component
                     )
                     
-                    # 頁面載入時更新標籤列表
-                    # demo.load(fn=self.get_all_tags_for_ui, outputs=tag_choices)
-                
                 # 搜尋頁面
                 with gr.TabItem("搜尋圖片"):
                     with gr.Row():
@@ -749,28 +737,27 @@ CLIP 是一個在極大規模、多領域資料上訓練的模型，設計目的
                     )
                 
                 # 新增：標籤畫廊頁面
-                with gr.TabItem("標籤畫廊"):
+                with gr.TabItem("媒體畫廊"):
                     with gr.Row():
                         with gr.Column(scale=1):
-
-                            
+                            media_type_choice = gr.Radio(choices=["圖片", "影片"], label="選擇媒體類型", value="圖片")
                             refresh_gallery_btn = gr.Button("刷新畫廊", variant="primary")
-                            gallery_result = gr.Textbox(label="結果")
+                            gallery_result_text = gr.Textbox(label="結果")
                             
-                            with gr.Accordion("刪除圖片", open=False):
-                                delete_image_id = gr.Textbox(label="輸入要刪除的圖片ID", placeholder="img_...")
-                                delete_btn = gr.Button("刪除圖片", variant="stop")
-                                delete_result = gr.Textbox(label="刪除結果")
+                            with gr.Accordion("刪除媒體", open=False):
+                                delete_media_id_input = gr.Textbox(label="輸入要刪除的媒體ID", placeholder="img_... or vid_...") # Renamed
+                                delete_btn = gr.Button("刪除媒體", variant="stop")
+                                delete_result_text = gr.Textbox(label="刪除結果")
                                 
                                 delete_btn.click(
                                     fn=self.delete_image,
-                                    inputs=[delete_image_id],
-                                    outputs=[delete_result]
+                                    inputs=[delete_media_id_input],
+                                    outputs=[delete_result_text]
                                 )
                         
                         with gr.Column(scale=2):
-                            all_images_gallery = gr.Gallery(
-                                label="所有圖片",
+                            all_media_gallery = gr.Gallery(
+                                label="所有媒體",
                                 columns=4,
                                 object_fit="contain",
                                 height="auto"
@@ -778,35 +765,35 @@ CLIP 是一個在極大規模、多領域資料上訓練的模型，設計目的
                     
                     with gr.Row():
                         with gr.Column(scale=1):
-                            gallery_details = gr.Markdown(label="圖片詳情")
+                            gallery_item_details_md = gr.Markdown(label="媒體詳情")
                         
                         with gr.Column(scale=1):
-                            similar_images_gallery = gr.Gallery(
-                                label="相似圖片",
+                            similar_items_gallery = gr.Gallery( 
+                                label="相似媒體",
                                 columns=3,
                                 object_fit="contain",
                                 height="auto"
                             )
                     
-                    # 刷新畫廊按鈕事件
                     refresh_gallery_btn.click(
-                        fn=self.get_all_images_with_tags,
-                        inputs=None,  # Removed gallery_tag_choices
-                        outputs=[gallery_result, all_images_gallery]
+                        fn=self.get_all_media, # Call new method
+                        inputs=[media_type_choice],  
+                        outputs=[gallery_result_text, all_media_gallery]
                     )
                     
-                    # 圖片點擊事件
-                    all_images_gallery.select(
-                        fn=self.get_gallery_image_details,
-                        inputs=[all_images_gallery],
-                        outputs=[gallery_details, similar_images_gallery]
+                    all_media_gallery.select(
+                        fn=self.get_gallery_item_details, # Call new method
+                        inputs=[all_media_gallery], # This input is just the gallery component, evt.index is used inside
+                        outputs=[gallery_item_details_md, similar_items_gallery] # Pass to new similar_items_gallery
                     )
                     
-                    # 頁面載入時更新畫廊
+                    def initial_load_gallery(media_type):
+                        return self.get_all_media(media_type=media_type)
+
                     demo.load(
-                        fn=lambda: self.get_all_images_with_tags(),
-                        inputs=None,
-                        outputs=[gallery_result, all_images_gallery]
+                        fn=initial_load_gallery,
+                        inputs=[media_type_choice], # Use the current value of the radio button
+                        outputs=[gallery_result_text, all_media_gallery]
                     )
                 
                 # 圖片問答頁面

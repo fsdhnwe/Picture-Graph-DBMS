@@ -23,7 +23,7 @@ class Neo4jGraphRAG:
         # 初始化LLM - 可以選擇本地模型或HuggingFace Hub上的模型
         if use_local_llm:
             try:
-                print(f"加载本地LLM")
+                print(f"加載本地LLM")
                 # 嘗試使用本機LLM（需要預先下載模型）
                 self.llm = LlamaCpp(
                     model_path="llama-2-7b-chat.Q3_K_L.gguf",  # 替換為您本地模型的路徑
@@ -33,7 +33,7 @@ class Neo4jGraphRAG:
                     verbose=False
                 )
             except Exception as e:
-                print(f"无法加载本地LLM，将使用HuggingFace模型: {e}")
+                print(f"無法加載本地LLM，將使用HuggingFace模型: {e}")
                 # 如果本地模型加载失败，回退到本地HuggingFace模型
                 try:
                     # 使用本地HuggingFace模型
@@ -56,7 +56,7 @@ class Neo4jGraphRAG:
         else:
             # 使用HuggingFace Hub上的模型
             try:
-                print(f"无法加载本地HuggingFace模型，将使用HuggingFace Hub上的模型")
+                print(f"無法加載本地HuggingFace模型，將使用HuggingFace Hub上的模型")
                 # 使用本地HuggingFace模型
                 model_name = "google/flan-t5-large"
                 tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -85,7 +85,7 @@ class Neo4jGraphRAG:
                 # 测试连接
                 with self.driver.session(database=NEO4J_DATABASE) as session:
                     session.run("RETURN 1")
-                    print("成功连接到Neo4j数据库")
+                    print("成功連接到Neo4j數據庫")
                     
                 # 确保Neo4j中存在必要的索引和约束
                 self._setup_database()
@@ -137,9 +137,9 @@ class Neo4jGraphRAG:
                                     MATCH (n:MultimediaContent)
                                     RETURN count(n) as count
                                 """)
-                                print("成功连接到Neo4j并验证MultimediaContent节点")
+                                print("成功連接到Neo4j並驗證MultimediaContent節點")
                             except Exception as e:
-                                print(f"验证Neo4j连接失败: {e}")
+                                print(f"驗證Neo4j連接失敗: {e}")
                     else:
                         # 其他错误
                         raise e
@@ -154,12 +154,12 @@ class Neo4jGraphRAG:
                     id_key="doc_id"
                 )
             except Exception as e:
-                print(f"Neo4j连接失败，切换到模拟模式: {e}")
+                print(f"Neo4j連接失敗，切換到模擬模式: {e}")
                 self.use_mock = True
                 self.doc_store = InMemoryStore()
                 self.mock_docs = []
         else:
-            print("使用模拟模式，不连接Neo4j数据库")
+            print("使用模擬模式，不連接Neo4j數據庫")
             self.doc_store = InMemoryStore()
             self.mock_docs = []
     
@@ -188,7 +188,7 @@ class Neo4jGraphRAG:
                                 index_exists = True
                                 break
                     except Exception as e:
-                        print(f"检查索引时出错: {e}")
+                        print(f"檢查索引時出錯: {e}")
                     
                     # 如果索引不存在，创建新索引
                     if not index_exists:
@@ -203,9 +203,9 @@ class Neo4jGraphRAG:
                                     `vector.similarity_function`: 'cosine'
                                 }}
                             """)
-                            print("Neo4j 5.x: 成功创建512维向量索引")
+                            print("Neo4j 5.x: 成功創建512維向量索引")
                         except Exception as e:
-                            print(f"创建Neo4j 5.x向量索引失败: {e}")
+                            print(f"創建Neo4j 5.x向量索引失敗: {e}")
                 else:
                     # Neo4j 4.x
                     try:
@@ -218,15 +218,15 @@ class Neo4jGraphRAG:
                               'cosine'
                             )
                         """)
-                        print("Neo4j 4.x: 成功创建512维向量索引")
+                        print("Neo4j 4.x: 成功創建512維向量索引")
                     except Exception as e:
                         if "equivalent index already exists" in str(e):
                             print("Neo4j 4.x: 索引已存在")
                         else:
-                            print(f"创建Neo4j 4.x向量索引失败: {e}")
+                            print(f"創建Neo4j 4.x向量索引失敗: {e}")
                 
             except Exception as e:
-                print(f"检查Neo4j版本或创建索引时发生错误: {e}")
+                print(f"檢查Neo4j版本或創建索引時發生錯誤: {e}")
                 # 尝试创建索引，忽略错误
                 try:
                     session.run("""
@@ -239,7 +239,7 @@ class Neo4jGraphRAG:
                         )
                     """)
                 except Exception as e2:
-                    print(f"尝试创建索引时出错: {e2}")
+                    print(f"嘗試創建索引時出錯: {e2}")
     
     def add_image(self, image_path, metadata=None, tags=None):
         """添加图片到图数据库，如果已存在則跳過"""
@@ -381,95 +381,47 @@ class Neo4jGraphRAG:
             return
         
         try:
+            # 基本方法：直接使用Cypher計算相似度並創建關係
             with self.driver.session(database=NEO4J_DATABASE) as session:
-                # 使用APOC進行批次向量比較，計算余弦相似度
+                # 查找相似的圖片
                 result = session.run("""
-                    MATCH (new:MultimediaContent:Image {id: $image_id})
-                    MATCH (existing:MultimediaContent:Image)
-                    WHERE existing.id <> $image_id AND existing.embedding IS NOT NULL
-                    WITH new, existing, 
-                         apoc.math.cosineSimilarity(new.embedding, existing.embedding) AS similarity
-                    WHERE similarity >= 0.75
-                    RETURN existing.id AS id, similarity AS score
-                    ORDER BY similarity DESC
+                    MATCH (n:MultimediaContent:Image)
+                    WHERE n.id <> $image_id
+                    WITH n, 
+                            reduce(s = 0.0, i IN range(0, size(n.embedding)-1) | 
+                            s + n.embedding[i] * $embedding[i]) / 
+                            (sqrt(reduce(s = 0.0, x IN n.embedding | s + x * x)) * 
+                            sqrt(reduce(s = 0.0, x IN $embedding | s + x * x))) as score
+                    WHERE score >= 0.75
+                    RETURN n.id as id, score
+                    ORDER BY score DESC
                     LIMIT 20
                 """, {
+                    "embedding": image_embedding.tolist(),
                     "image_id": image_id
                 })
                 
-                # 收集所有需要創建關係的對
-                similar_pairs = [(record["id"], record["score"]) for record in result]
-                
-                if similar_pairs:
-                    # 使用APOC批次創建雙向關係
-                    # 注意：APOC的create.relationship會自動處理方向性
-                    pairs_param = [
-                        {"img1": image_id, "img2": similar_id, "score": similarity}
-                        for similar_id, similarity in similar_pairs
-                    ]
+                # 創建相似關係
+                for record in result:
+                    similar_id = record["id"]
+                    similarity = record["score"]
                     
-                    # 執行批次創建關係
+                    # 創建雙向相似關係
                     session.run("""
-                        UNWIND $pairs AS pair
-                        MATCH (img1:MultimediaContent:Image {id: pair.img1})
-                        MATCH (img2:MultimediaContent:Image {id: pair.img2})
-                        CALL apoc.create.relationship(img1, 'SIMILAR', {score: pair.score}, img2) YIELD rel as r1
-                        CALL apoc.create.relationship(img2, 'SIMILAR', {score: pair.score}, img1) YIELD rel as r2
-                        RETURN count(*)
-                    """, {"pairs": pairs_param})
-                    
-                    # 輸出日誌
-                    for similar_id, similarity in similar_pairs:
-                        print(f"使用APOC創建雙向相似關係: {image_id} <-> SIMILAR({similarity:.4f}) <-> {similar_id}")
-                
-                print(f"成功使用APOC處理 {len(similar_pairs)} 個相似圖片關係")
-                
-        except Exception as e:
-            print(f"檢查圖片相似度時發生錯誤: {e}")
-            # 嘗試退回到基本方法
-            print("嘗試使用基本方法創建相似關係...")
-            try:
-                # 基本方法：直接使用Cypher計算相似度並創建關係
-                with self.driver.session(database=NEO4J_DATABASE) as session:
-                    # 查找相似的圖片
-                    result = session.run("""
-                        MATCH (n:MultimediaContent:Image)
-                        WHERE n.id <> $image_id
-                        WITH n, 
-                             reduce(s = 0.0, i IN range(0, size(n.embedding)-1) | 
-                                s + n.embedding[i] * $embedding[i]) / 
-                             (sqrt(reduce(s = 0.0, x IN n.embedding | s + x * x)) * 
-                              sqrt(reduce(s = 0.0, x IN $embedding | s + x * x))) as score
-                        WHERE score >= 0.75
-                        RETURN n.id as id, score
-                        ORDER BY score DESC
-                        LIMIT 20
+                        MATCH (img1:MultimediaContent:Image {id: $img1_id})
+                        MATCH (img2:MultimediaContent:Image {id: $img2_id})
+                        MERGE (img1)-[r1:SIMILAR {score: $score}]->(img2)
+                        MERGE (img2)-[r2:SIMILAR {score: $score}]->(img1)
+                        RETURN r1, r2
                     """, {
-                        "embedding": image_embedding.tolist(),
-                        "image_id": image_id
+                        "img1_id": image_id,
+                        "img2_id": similar_id,
+                        "score": similarity
                     })
                     
-                    # 創建相似關係
-                    for record in result:
-                        similar_id = record["id"]
-                        similarity = record["score"]
-                        
-                        # 創建雙向相似關係
-                        session.run("""
-                            MATCH (img1:MultimediaContent:Image {id: $img1_id})
-                            MATCH (img2:MultimediaContent:Image {id: $img2_id})
-                            MERGE (img1)-[r1:SIMILAR {score: $score}]->(img2)
-                            MERGE (img2)-[r2:SIMILAR {score: $score}]->(img1)
-                            RETURN r1, r2
-                        """, {
-                            "img1_id": image_id,
-                            "img2_id": similar_id,
-                            "score": similarity
-                        })
-                        
-                        print(f"創建雙向相似關係: {image_id} <-> SIMILAR({similarity:.4f}) <-> {similar_id}")
-            except Exception as e2:
-                print(f"基本方法也失敗了: {e2}")
+                    print(f"創建雙向相似關係: {image_id} <-> SIMILAR({similarity:.4f}) <-> {similar_id}")
+        except Exception as e2:
+            print(f"基本方法失敗: {e2}")
     
     def add_video(self, video_path, metadata=None):
         """添加视频到图数据库"""
@@ -999,39 +951,73 @@ class Neo4jGraphRAG:
     def get_all_images(self, limit=50):
         """獲取數據庫中所有的圖片"""
         if self.use_mock:
-            return self.mock_docs[:limit] if self.mock_docs else []
+            # 返回模拟数据中所有类型为 "image" 的文档
+            return [doc for doc in self.mock_docs if doc.metadata.get("type") == "image"][:limit]
         
         try:
-            # 使用Cypher查詢獲取圖片內容
             with self.driver.session(database=NEO4J_DATABASE) as session:
-                result = session.run("""
-                    MATCH (n:MultimediaContent)
-                    WHERE n.type = 'image' OR n.type = 'Image'
-                    RETURN n.id as id, n.description as description, 
-                           n.path as path, n.filename as filename,
-                           n.type as type, n.embedding as embedding
+                results = session.run("""
+                    MATCH (n:MultimediaContent:Image)
+                    RETURN n.id as id, n.path as path, n.description as description, 
+                           n.filename as filename, n.embedding as embedding, properties(n) as metadata
                     LIMIT $limit
-                """, limit=limit).data()
-            
-            # 將結果轉換為Document對象
-            docs = []
-            for item in result:
-                # 創建Document對象
-                doc = Document(
-                    page_content=item.get("description", ""),
-                    metadata={
-                        "doc_id": item.get("id"),
-                        "path": item.get("path"),
-                        "filename": item.get("filename"),
-                        "type": item.get("type"),
-                        "embedding": np.array(item["embedding"]) if item.get("embedding") is not None else None 
-                    }
-                )
-                docs.append(doc)
-            
-            return docs
+                """, {"limit": limit})
+                
+                docs = []
+                for record in results:
+                    metadata = record["metadata"]
+                    # Ensure embedding is a list of floats if it exists
+                    if "embedding" in metadata and metadata["embedding"] is not None:
+                        try:
+                            # Assuming embedding is stored as a list of numbers
+                            metadata["embedding"] = [float(x) for x in metadata["embedding"]]
+                        except (TypeError, ValueError) as e:
+                            print(f"Warning: Could not convert embedding to list of floats for image {record['id']}: {e}")
+                            metadata["embedding"] = None # Or handle as appropriate
+
+                    doc = Document(
+                        page_content=record["description"] if record["description"] else "",
+                        metadata=metadata
+                    )
+                    docs.append(doc)
+                return docs
         except Exception as e:
-            print(f"獲取圖片時發生錯誤: {e}")
+            print(f"獲取所有圖片時發生錯誤: {e}")
+            return []
+            
+    def get_all_videos(self, limit=50):
+        """獲取數據庫中所有的影片"""
+        if self.use_mock:
+            # 返回模拟数据中所有类型为 "video" 的文档
+            return [doc for doc in self.mock_docs if doc.metadata.get("type") == "video"][:limit]
+        
+        try:
+            with self.driver.session(database=NEO4J_DATABASE) as session:
+                results = session.run("""
+                    MATCH (n:MultimediaContent:Video)
+                    RETURN n.id as id, n.path as path, n.description as description, 
+                           n.title as title, n.embedding as embedding, properties(n) as metadata
+                    LIMIT $limit
+                """, {"limit": limit})
+                
+                docs = []
+                for record in results:
+                    metadata = record["metadata"]
+                    if "embedding" in metadata and metadata["embedding"] is not None:
+                        try:
+                            metadata["embedding"] = [float(x) for x in metadata["embedding"]]
+                        except (TypeError, ValueError) as e:
+                            print(f"Warning: Could not convert embedding to list of floats for video {record['id']}: {e}")
+                            metadata["embedding"] = None
+
+                    doc = Document(
+                        page_content=record["description"] if record["description"] else "",
+                        metadata=metadata  # metadata already contains path, title, etc.
+                    )
+                    docs.append(doc)
+                return docs
+        except Exception as e:
+            print(f"獲取所有影片時發生錯誤: {e}")
             return []
             
     def advanced_search(self, query, k=10, min_similarity=0.7):
