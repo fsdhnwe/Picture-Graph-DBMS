@@ -51,7 +51,8 @@ class MultiModalEncoder:
         """使用CLIP模型将文本編碼為向量表示"""
         try:
             # 使用CLIP处理器处理文本
-            inputs = self.clip_processor(text=text, return_tensors="pt", padding=True, truncation=True)
+            translate_text = self.translate_text(text)
+            inputs = self.clip_processor(text=translate_text, return_tensors="pt", padding=True, truncation=True)
 
             # 通过模型获取特征
             with torch.no_grad():
@@ -89,29 +90,20 @@ class MultiModalEncoder:
                 return text
                 
             # 导入必要的模型和分词器
-            from transformers import M2M100ForConditionalGeneration, M2M100Tokenizer
-            
-            # 加载M2M100模型和分词器
-            model_name = "facebook/m2m100_418M"  # 可以使用更小的模型以提高速度
-            tokenizer = M2M100Tokenizer.from_pretrained(model_name)
-            model = M2M100ForConditionalGeneration.from_pretrained(model_name)
-            
-            # 设置源语言为中文
-            tokenizer.src_lang = "zh"
-            
-            # 编码输入文本
-            encoded_text = tokenizer(text, return_tensors="pt")
-            
-            # 生成翻译
-            generated_tokens = model.generate(
-                **encoded_text,
-                forced_bos_token_id=tokenizer.get_lang_id("en"),
-                max_length=128
+            import argostranslate.package, argostranslate.translate
+
+            from_code = "zh"
+            to_code = "en"
+
+            # 更新語言包索引
+            argostranslate.package.update_package_index()
+            # 找出並安裝你想要的語言包 (e.g. 中文到英文)
+            available_packages = argostranslate.package.get_available_packages()
+            package_to_install = next(
+                filter(lambda x: x.from_code == 'zh' and x.to_code == 'en', available_packages)
             )
-            
-            # 解码生成的翻译
-            translated_text = tokenizer.batch_decode(generated_tokens, skip_special_tokens=True)[0]
-            
+            argostranslate.package.install_from_path(package_to_install.download())
+            translated_text = argostranslate.translate.translate(text, from_code, to_code)
             print(f"Translated from Chinese to English: {text} -> {translated_text}")
             return translated_text
             
