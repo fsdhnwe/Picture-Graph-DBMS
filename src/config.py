@@ -9,12 +9,6 @@ config_path = os.path.join(BASE_DIR, 'config', 'config.ini')
 config = configparser.ConfigParser()
 config.read(config_path, encoding='utf-8')
 
-# 取得 Neo4j 設定
-NEO4J_URI = config.get('neo4j', 'uri')
-NEO4J_USERNAME = config.get('neo4j', 'username')
-NEO4J_PASSWORD = config.get('neo4j', 'password')
-NEO4J_DATABASE = config.get('neo4j', 'database')
-
 # 取得模型設定
 USE_LOCAL_LLM = config.getboolean('model', 'use_local_llm', fallback=True)
 LOCAL_MODEL_PATH = config.get('model', 'local_model_path')

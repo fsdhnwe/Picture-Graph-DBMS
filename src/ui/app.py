@@ -1,8 +1,6 @@
 import os
-import sys
 import gradio as gr
 import tempfile
-from pathlib import Path
 import shutil
 import numpy as np
 import time
@@ -11,20 +9,22 @@ import matplotlib.pyplot as plt
 import io
 from sklearn.manifold import TSNE
 import base64
-import pandas as pd
 import tempfile
-import uuid
 import traceback
+import datetime
 
 
 # 使用絕對路徑導入
-from src.database.neo4j_graph_rag import Neo4jGraphRAG
-from src.config import NEO4J_DATABASE
+from src.database.clip_milvus import ClipMilvus
 
 class ImageDatabaseUI:
     def __init__(self):
         # 初始化資料庫連接
-        self.db = Neo4jGraphRAG(use_local_llm=True)
+        milvus_config = {
+            'host': 'localhost',
+            'port': '19530'
+        }
+        self.db = ClipMilvus(use_local_llm=True, milvus_config=milvus_config)
         
         # 創建臨時目錄存放上傳圖片
         self.temp_dir = tempfile.mkdtemp()
@@ -107,143 +107,6 @@ class ImageDatabaseUI:
         else:
             return f"所有檔案上傳成功！\\n" + "\\n".join(results), saved_media_paths
     
-    def search_images(self, query, min_similarity=0.65):
-        """搜尋相似圖片"""
-        if not query.strip():
-            return "請輸入搜尋關鍵詞", [], None
-        
-        try:
-            # 執行搜尋
-            results = self.db.advanced_search(query, k=9, min_similarity=min_similarity)
-            
-            # 保存結果以便顯示詳情
-            self.current_search_results = results
-            
-            # 提取圖片路徑
-            image_paths = []
-            for doc in results:
-                path = doc.metadata.get("path")
-                if path and os.path.exists(path):
-                    image_paths.append((path, doc.metadata.get("score", 0)))
-                else:
-                    # 無效路徑，可能添加預設圖像
-                    pass
-            
-            # 格式化結果訊息
-            if image_paths:
-                result_text = f"找到 {len(image_paths)} 個相關圖片"
-                for i, (path, score) in enumerate(image_paths):
-                    result_text += f"\n{i+1}. {os.path.basename(path)} (相似度: {score:.4f})"
-            else:
-                result_text = "沒有找到相關圖片"
-                return result_text, [], None
-            
-            # 生成查詢詞與圖片的t-SNE可視化
-            tsne_html = self._generate_search_tsne(query, [path for path, _ in image_paths])
-            
-            # 只返回路徑列表用於圖片展示
-            return result_text, [path for path, _ in image_paths], tsne_html
-        
-        except Exception as e:
-            return f"搜尋失敗: {str(e)}", [], None
-            
-    def _generate_search_tsne(self, query, image_paths):
-        """為搜尋查詢和檢索到的圖片生成t-SNE可視化"""
-        try:
-            if not image_paths:
-                return None
-                
-            # 收集嵌入向量
-            query_embedding = self.db.encoder.encode_text(query)
-            image_embeddings = []
-            labels = []
-            
-            # 為每個圖片獲取嵌入
-            for path in image_paths:
-                if not os.path.exists(path):
-                    continue
-                
-                # 獲取圖片嵌入
-                img_embedding = self.db.encoder.encode_image(path)
-                
-                # 添加到列表
-                image_embeddings.append(img_embedding)
-                
-                # 設置標籤 (圖片檔名)
-                filename = os.path.basename(path)
-                labels.append(filename)
-            
-            if not image_embeddings:
-                return None
-            
-            # 合併所有嵌入以一起進行t-SNE
-            combined_embeddings = np.vstack([
-                np.array([query_embedding]),
-                np.array(image_embeddings)
-            ])
-            
-            # 應用t-SNE降維
-            tsne = TSNE(n_components=2, random_state=42, perplexity=min(5, len(combined_embeddings)-1))
-            embeddings_2d = tsne.fit_transform(combined_embeddings)
-            
-            # 分離查詢和圖片的降維結果
-            query_tsne = embeddings_2d[0]
-            images_tsne = embeddings_2d[1:]
-            
-            # 創建可視化
-            plt.figure(figsize=(10, 8))
-            
-            # 繪製查詢嵌入
-            plt.scatter(query_tsne[0], query_tsne[1], c='red', marker='*', s=200, label='Query', edgecolors='black')
-            
-            # 繪製圖片嵌入
-            plt.scatter(images_tsne[:, 0], images_tsne[:, 1], c='blue', label='Images', alpha=0.7)
-            
-            # 繪製連線 (查詢與所有圖片的連接)
-            for i in range(len(images_tsne)):
-                plt.plot([query_tsne[0], images_tsne[i, 0]], 
-                         [query_tsne[1], images_tsne[i, 1]], 
-                         'k-', alpha=0.2)
-            
-            # 添加圖片標籤
-            for i, label in enumerate(labels):
-                plt.annotate(label, 
-                             xy=(images_tsne[i, 0], images_tsne[i, 1]),
-                             xytext=(5, 5),
-                             textcoords='offset points',
-                             fontsize=8)
-            
-            # 添加查詢標籤
-            plt.annotate(f'Query: "{query}"', 
-                         xy=(query_tsne[0], query_tsne[1]),
-                         xytext=(10, 10),
-                         textcoords='offset points',
-                         fontsize=10,
-                         weight='bold')
-            
-            plt.legend()
-            plt.title('Search Query and Images t-SNE Visualization')
-            plt.grid(True, linestyle='--', alpha=0.7)
-            
-            # 保存圖片到內存
-            buf = io.BytesIO()
-            plt.savefig(buf, format='png', dpi=300, bbox_inches='tight')
-            buf.seek(0)
-            
-            # 將緩衝區數據轉換為base64編碼
-            img_str = base64.b64encode(buf.read()).decode('utf-8')
-            img_html = f'<img src="data:image/png;base64,{img_str}" alt="Search t-SNE Visualization">'
-            
-            # 關閉圖形
-            plt.close()
-            
-            return img_html
-            
-        except Exception as e:
-            import traceback
-            tb = traceback.format_exc()
-            print(f"生成搜尋t-SNE可視化時發生錯誤: {str(e)}\n{tb}")
-            return None
     
     def get_image_details(self, evt: gr.SelectData, gallery):
         """當用戶點擊圖片時顯示詳情"""
@@ -289,7 +152,7 @@ class ImageDatabaseUI:
     
     
     def search_images_direct_clip(self, query, min_similarity=0.65):
-        """直接使用CLIP計算文字-圖片相似度搜尋圖片，不通過Neo4j"""
+        """直接使用CLIP計算文字-圖片相似度搜尋圖片"""
         if not query.strip():
             return "請輸入搜尋關鍵詞", [], None
         
@@ -338,26 +201,29 @@ CLIP 是一個在極大規模、多領域資料上訓練的模型，設計目的
                 
                 # 計算余弦相似度
                 # 確保兩個向量都是正規化的（通常 CLIP 的輸出是正規化的，但計算余弦相似度時明確做一次比較穩妥）
-                query_embedding_norm = query_embedding / np.linalg.norm(query_embedding)
-                image_embedding_norm = image_embedding / np.linalg.norm(image_embedding)
-                
-                similarity = np.dot(query_embedding_norm, image_embedding_norm)
-                
-                # 打印每個圖片的相似度分數
-                # print(f"圖片: {os.path.basename(image_path)}, 相似度: {similarity:.4f}")
-                
-                # 如果相似度高於閾值，添加到結果
-                if similarity >= min_similarity:
-                    # 添加到結果文檔列表
-                    image_doc.metadata["score"] = similarity # 將分數添加到文檔 metadata
-                    image_doc.metadata["original_score"] = similarity
-                    results.append(image_doc)
-
-                    # 添加用於顯示的信息
-                    image_display_info.append((image_path, similarity))
+                try:
+                    query_embedding_norm = query_embedding / np.linalg.norm(query_embedding)
+                    image_embedding_norm = image_embedding / np.linalg.norm(image_embedding)
                     
-                    # 添加用於 T-SNE 的數據點 (embedding, label)
-                    tsne_data_points.append((image_embedding, filename))
+                    similarity = np.dot(query_embedding_norm, image_embedding_norm)
+                    
+                    # 打印每個圖片的相似度分數
+                    # print(f"圖片: {os.path.basename(image_path)}, 相似度: {similarity:.4f}")
+                    
+                    # 如果相似度高於閾值，添加到結果
+                    if similarity >= min_similarity:
+                        # 添加到結果文檔列表
+                        image_doc.metadata["score"] = similarity # 將分數添加到文檔 metadata
+                        image_doc.metadata["original_score"] = similarity
+                        results.append(image_doc)
+
+                        # 添加用於顯示的信息
+                        image_display_info.append((image_path, similarity))
+                        
+                        # 添加用於 T-SNE 的數據點 (embedding, label)
+                        tsne_data_points.append((image_embedding, filename))
+                except Exception as e:
+                    print(f"計算圖片 '{filename}' 的相似度時發生錯誤: {e}")
             
             # 按相似度降序排序結果
             results.sort(key=lambda x: x.metadata.get("score", 0), reverse=True)
@@ -381,119 +247,14 @@ CLIP 是一個在極大規模、多領域資料上訓練的模型，設計目的
                 # 如果沒有結果，也不需要生成 T-SNE
                 return result_text, [], None
             
-            # 生成查詢詞與圖片的t-SNE可視化
-            tsne_html = self._generate_search_tsne_direct(query, query_embedding, image_display_info)
-            
             # 返回路徑列表用於圖片展示
-            return result_text, [path for path, _ in image_display_info], tsne_html
+            return result_text, [path for path, _ in image_display_info]
         
         except Exception as e:
             import traceback
             tb = traceback.format_exc()
             return f"搜尋失敗: {str(e)}\n{tb}", [], None
     
-    def _generate_search_tsne_direct(self, query, query_embedding, image_paths_with_scores):
-        """為直接搜尋生成t-SNE可視化，使用已經計算好的嵌入"""
-        try:
-            if not image_paths_with_scores:
-                return None
-                
-            image_embeddings = []
-            image_scores = []
-            labels = []
-            
-            # 為每個圖片獲取嵌入
-            for path, score in image_paths_with_scores:
-                if not os.path.exists(path):
-                    continue
-                
-                # 獲取圖片嵌入
-                img_embedding = self.db.encoder.encode_image(path)
-                
-                # 添加到列表
-                image_embeddings.append(img_embedding)
-                image_scores.append(score)
-                
-                # 設置標籤 (圖片檔名)
-                filename = os.path.basename(path)
-                labels.append(filename)
-            
-            if not image_embeddings:
-                return None
-            
-            # 合併所有嵌入以一起進行t-SNE
-            combined_embeddings = np.vstack([
-                np.array([query_embedding]),
-                np.array(image_embeddings)
-            ])
-            
-            # 應用t-SNE降維
-            tsne = TSNE(n_components=2, random_state=42, perplexity=min(5, len(combined_embeddings)-1))
-            embeddings_2d = tsne.fit_transform(combined_embeddings)
-            
-            # 分離查詢和圖片的降維結果
-            query_tsne = embeddings_2d[0]
-            images_tsne = embeddings_2d[1:]
-            
-            # 創建可視化
-            plt.figure(figsize=(10, 8))
-            
-            # 繪製查詢嵌入
-            plt.scatter(query_tsne[0], query_tsne[1], c='red', marker='*', s=200, label='Query', edgecolors='black')
-            
-            # 創建顏色映射，基於分數的顏色漸變
-            norm = plt.Normalize(min(image_scores), max(image_scores))
-            cmap = plt.cm.viridis
-            
-            # 繪製圖片嵌入，顏色基於相似度
-            sc = plt.scatter(images_tsne[:, 0], images_tsne[:, 1], 
-                       c=image_scores, cmap=cmap, 
-                       label='Images', alpha=0.7)
-            
-            # 添加顏色條
-            cbar = plt.colorbar(sc)
-            cbar.set_label('Similarity Score')
-            
-            # 繪製連線 (查詢與所有圖片的連接)
-            for i in range(len(images_tsne)):
-                # 線的顏色也根據相似度變化
-                plt.plot([query_tsne[0], images_tsne[i, 0]], 
-                         [query_tsne[1], images_tsne[i, 1]], 
-                         color=cmap(norm(image_scores[i])), alpha=0.4)
-            
-            # 添加圖片標籤
-            for i, label in enumerate(labels):
-                plt.annotate(f"{label} ({image_scores[i]:.2f})", 
-                             xy=(images_tsne[i, 0], images_tsne[i, 1]),
-                             xytext=(5, 5),
-                             textcoords='offset points',
-                             fontsize=8)
-            
-            # 添加查詢標籤
-            plt.annotate(f'Query: "{query}"', 
-                         xy=(query_tsne[0], query_tsne[1]),
-                         xytext=(10, 10),
-                         textcoords='offset points',
-                         fontsize=10,
-                         weight='bold')
-            
-            plt.legend()
-            plt.title('Direct CLIP Similarity: Query and Images t-SNE Visualization')
-            plt.grid(True, linestyle='--', alpha=0.7)
-            
-            # 保存圖片到內存
-            buf = io.BytesIO()
-            plt.savefig(buf, format='png', dpi=300, bbox_inches='tight')
-            buf.seek(0)
-            
-            # 將緩衝區數據轉換為base64編碼
-            img_str = base64.b64encode(buf.read()).decode('utf-8')
-            img_html = f'<img src="data:image/png;base64,{img_str}" alt="Search t-SNE Visualization">'
-            
-            # 關閉圖形
-            plt.close()
-            
-            return img_html
             
         except Exception as e:
             import traceback
@@ -554,7 +315,7 @@ CLIP 是一個在極大規模、多領域資料上訓練的模型，設計目的
             return "無法獲取媒體詳情", [], []
         
         doc = self.current_gallery_images[evt.index]
-        doc_id = doc.metadata.get("id")
+        doc_id = doc.metadata.get("doc_id")
         media_type = doc.metadata.get("type", "未知類型") # image or video
 
         details = f"## {media_type.capitalize()} 詳情\n\n"
@@ -567,32 +328,38 @@ CLIP 是一個在極大規模、多領域資料上訓練的模型，設計目的
         
         details += "**其他信息:**\n\n"
         for key, value in doc.metadata.items():
-            if key not in ["id", "type", "path", "filename", "title", "embedding", "description"]:
+            if key not in ["doc_id", "type", "path", "filename", "title", "description", "embedding"]:
+                if key == "created_time" or key == "updated_time":
+                    # 格式化時間戳
+                    value = datetime.datetime.fromtimestamp(value).strftime('%Y-%m-%d %H:%M:%S')
                 details += f"- {key}: {value}\n"
         
         # 查找相似圖片
         try:
             similar_gallery_images = []  # 包含圖片和標題的列表
             
-            # 使用Neo4j查詢與當前圖片相似的圖片
-            with self.db.driver.session(database=NEO4J_DATABASE) as session:
-                result = session.run("""
-                    MATCH (img:MultimediaContent:Image {id: $image_id})-[r:SIMILAR]->(similar:MultimediaContent:Image)
-                    RETURN similar.id as id, similar.path as path, r.score as similarity
-                    ORDER BY r.score DESC
-                    LIMIT 10
-                """, {"image_id": doc_id})
+            # 使用Milvus查詢與當前圖片相似的圖片
+            # 1. 首先獲取當前圖片的cluster_id
+            cluster_id = doc.metadata.get("cluster_id")
+            
+            if cluster_id:
+                # 2. 獲取相同cluster_id的圖片
+                similar_docs = self.db.get_images_by_cluster(cluster_id, limit=10)
                 
-                for record in result:
-                    path = record["path"]
-                    if path and os.path.exists(path):
-                        # 加載為PIL圖片對象
-                        try:
-                            print("Gallery paths:", path)
-                            title = f"{os.path.basename(path)} (相似度: {record['similarity']:.4f})"
-                            similar_gallery_images.append((path, title))
-                        except Exception as e:
-                            print(f"無法加載相似圖片 {path}: {e}")
+                # 過濾掉當前圖片自身
+                similar_docs = [d for d in similar_docs if d.metadata.get("doc_id") != doc_id]
+                
+                # 如果找到相似圖片
+                if similar_docs:
+                    for similar_doc in similar_docs:
+                        path = similar_doc.metadata.get("path")
+                        if path and os.path.exists(path):
+                            try:
+                                filename = similar_doc.metadata.get("filename", os.path.basename(path))
+                                title = f"{filename} (同群組: {cluster_id})"
+                                similar_gallery_images.append((path, title))
+                            except Exception as e:
+                                print(f"無法加載相似圖片 {path}: {e}")
             
             # 返回結果
             return details, similar_gallery_images, [item[1] for item in similar_gallery_images]
@@ -600,44 +367,44 @@ CLIP 是一個在極大規模、多領域資料上訓練的模型，設計目的
             return f"{details}\n\n獲取相似圖片時發生錯誤: {str(e)}", [], []
     
     def delete_image(self, image_id):
-        """從檔案系統和Neo4j中刪除圖片"""
+        """從檔案系統和Milvus中刪除圖片"""
         if not image_id:
             return "請提供要刪除的圖片ID"
         
         try:
-            # 首先獲取圖片的路徑
-            path = None
-            with self.db.driver.session(database=NEO4J_DATABASE) as session:
-                result = session.run("""
-                    MATCH (img:MultimediaContent:Image {id: $image_id})
-                    RETURN img.path as path
-                """, {"image_id": image_id})
-                record = result.single()
-                if record:
-                    path = record["path"]
+            # 從所有圖片中查找匹配的ID
+            all_images = self.db.get_all_images(limit=1000)
+            target_image = None
             
-            if not path:
+            for img in all_images:
+                if img.metadata.get("doc_id") == image_id:
+                    target_image = img
+                    break
+            
+            if not target_image:
                 return f"找不到ID為 {image_id} 的圖片"
-                
-            # 從Neo4j中刪除圖片（使用DETACH DELETE）
-            with self.db.driver.session(database=NEO4J_DATABASE) as session:
-                session.run("""
-                    MATCH (img:MultimediaContent:Image {id: $image_id})
-                    DETACH DELETE img
-                """, {"image_id": image_id})
+            
+            path = target_image.metadata.get("path")
+            
+            # 從Milvus中刪除圖片
+            db_deleted = self.db.delete_image(image_id)
             
             # 從檔案系統中刪除圖片
-            if os.path.exists(path):
+            if path and os.path.exists(path):
                 os.remove(path)
                 file_deleted = True
             else:
                 file_deleted = False
             
             # 返回結果
-            if file_deleted:
+            if db_deleted and file_deleted:
                 return f"圖片 {image_id} 已成功從資料庫和檔案系統中刪除"
+            elif db_deleted:
+                return f"圖片 {image_id} 已從資料庫中刪除，但檔案不存在或無法刪除"
+            elif file_deleted:
+                return f"圖片 {image_id} 檔案已從檔案系統中刪除，但資料庫刪除失敗"
             else:
-                return f"圖片 {image_id} 已從資料庫中刪除，但檔案 {path} 不存在或無法刪除"
+                return f"圖片 {image_id} 刪除失敗：資料庫和檔案系統都未能刪除"
                 
         except Exception as e:
             import traceback
@@ -702,8 +469,7 @@ CLIP 是一個在極大規模、多領域資料上訓練的模型，設計目的
                                 label="最低相似度閾值"
                             )
                             with gr.Row():
-                                search_btn = gr.Button("Neo4j搜尋", variant="primary")
-                                direct_search_btn = gr.Button("CLIP搜尋", variant="secondary")
+                                direct_search_btn = gr.Button("CLIP搜尋")
                             search_result = gr.Textbox(label="搜尋結果")
                         
                         with gr.Column(scale=2):
@@ -715,19 +481,11 @@ CLIP 是一個在極大規模、多領域資料上訓練的模型，設計目的
                             )
                             details = gr.Markdown(label="圖片詳情")
                     
-                    with gr.Row():
-                        search_tsne = gr.HTML(label="查詢-圖片關係可視化", visible=True)
-                    
-                    search_btn.click(
-                        fn=self.search_images,
-                        inputs=[search_query, similarity_threshold],
-                        outputs=[search_result, gallery, search_tsne]
-                    )
                     
                     direct_search_btn.click(
                         fn=self.search_images_direct_clip,
                         inputs=[search_query, similarity_threshold],
-                        outputs=[search_result, gallery, search_tsne]
+                        outputs=[search_result, gallery]
                     )
                     
                     gallery.select(
@@ -804,7 +562,7 @@ CLIP 是一個在極大規模、多領域資料上訓練的模型，設計目的
                             qa_similarity = gr.Slider(
                                 minimum=0.1, 
                                 maximum=0.9, 
-                                value=0.65, 
+                                value=0.25, 
                                 step=0.05, 
                                 label="最低相似度閾值"
                             )

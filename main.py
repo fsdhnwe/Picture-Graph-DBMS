@@ -1,4 +1,4 @@
-from src.database.neo4j_graph_rag import Neo4jGraphRAG
+from src.database.clip_milvus import MilvusGraphRAG
 import os
 import time
 
@@ -142,8 +142,8 @@ def main():
     use_mock = setup_neo4j_connection()
     
     # 初始化 - 根據選擇使用模擬模式或真實模式
-    graph_rag = Neo4jGraphRAG(use_local_llm=False, use_mock=use_mock)
-    
+    graph_rag = MilvusGraphRAG(use_local_llm=False, use_mock=use_mock)
+
     # 測試目錄
     image_dir = "./test_images"
     

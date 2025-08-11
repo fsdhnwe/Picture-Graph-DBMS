@@ -52,7 +52,7 @@ class MultiModalEncoder:
         try:
             # 使用CLIP处理器处理文本
             inputs = self.clip_processor(text=text, return_tensors="pt", padding=True, truncation=True)
-            
+
             # 通过模型获取特征
             with torch.no_grad():
                 text_features = self.clip_model.get_text_features(**inputs)
@@ -61,17 +61,63 @@ class MultiModalEncoder:
             text_embedding = text_features.squeeze().cpu().numpy()
             # 标准化向量
             text_embedding = text_embedding / np.linalg.norm(text_embedding)
-
-            # 打印查詢文字的嵌入向量
-            # print(f"\n搜尋查詢 '{text}' 的嵌入向量:")
-            # print(f"維度: {text_embedding.shape}")
-            # print(f"嵌入向量: {text_embedding.tolist()}")
-            # print(f"嵌入向量範數: {np.linalg.norm(text_embedding)}")
             
             return text_embedding
         except Exception as e:
             print(f"Error encoding text with CLIP: {e}")
             return None
+            
+    def translate_text(self, text):
+        """检测中文文本并翻译成英文
+        
+        Args:
+            text (str): 输入文本，可以是中文或其他语言
+            
+        Returns:
+            str: 如果输入是中文则返回英文翻译，否则返回原文
+        """
+        try:
+            # 检测文本是否包含中文字符
+            def contains_chinese(text):
+                for char in text:
+                    if '\u4e00' <= char <= '\u9fff':
+                        return True
+                return False
+            
+            # 如果不包含中文，直接返回原文
+            if not contains_chinese(text):
+                return text
+                
+            # 导入必要的模型和分词器
+            from transformers import M2M100ForConditionalGeneration, M2M100Tokenizer
+            
+            # 加载M2M100模型和分词器
+            model_name = "facebook/m2m100_418M"  # 可以使用更小的模型以提高速度
+            tokenizer = M2M100Tokenizer.from_pretrained(model_name)
+            model = M2M100ForConditionalGeneration.from_pretrained(model_name)
+            
+            # 设置源语言为中文
+            tokenizer.src_lang = "zh"
+            
+            # 编码输入文本
+            encoded_text = tokenizer(text, return_tensors="pt")
+            
+            # 生成翻译
+            generated_tokens = model.generate(
+                **encoded_text,
+                forced_bos_token_id=tokenizer.get_lang_id("en"),
+                max_length=128
+            )
+            
+            # 解码生成的翻译
+            translated_text = tokenizer.batch_decode(generated_tokens, skip_special_tokens=True)[0]
+            
+            print(f"Translated from Chinese to English: {text} -> {translated_text}")
+            return translated_text
+            
+        except Exception as e:
+            print(f"Error translating text: {e}")
+            return text  # 出错时返回原文
     
     def encode_video(self, video_path, num_frames=8):
         """使用CLIP将视频编码为向量表示，抽取关键帧后编码"""
