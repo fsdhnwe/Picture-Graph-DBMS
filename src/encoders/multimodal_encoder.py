@@ -157,32 +157,6 @@ class MultiModalEncoder:
             print(f"Error encoding video with CLIP: {e}")
             return None
     
-    def encode_youtube_video(self, youtube_url, temp_dir="./temp_videos"):
-        """从YouTube URL下载视频并编码"""
-        try:
-            os.makedirs(temp_dir, exist_ok=True)
-            yt = YouTube(youtube_url)
-            video_path = yt.streams.filter(progressive=True, file_extension='mp4').first().download(temp_dir)
-            
-            # 提取视频标题和描述作为元数据
-            metadata = {
-                "title": yt.title,
-                "description": yt.description,
-                "author": yt.author,
-                "url": youtube_url
-            }
-            
-            # 编码视频
-            embedding = self.encode_video(video_path)
-            
-            # 可选：删除临时文件
-            os.remove(video_path)
-            
-            return embedding, metadata
-        except Exception as e:
-            print(f"Error processing YouTube video: {e}")
-            return None, {}
-    
     def generate_text_description(self, image_path):
         """使用BLIP模型生成圖片描述"""
         try:
