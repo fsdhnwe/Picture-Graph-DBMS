@@ -4,7 +4,6 @@ from PIL import Image
 import cv2
 import numpy as np
 import os
-from pytube import YouTube
 from langchain_huggingface import HuggingFaceEmbeddings
 from transformers import CLIPProcessor, CLIPModel
 

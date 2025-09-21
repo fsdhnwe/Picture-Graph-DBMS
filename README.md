@@ -28,8 +28,11 @@ source .venv/bin/activate      # Linux/macOS
 
 使用 conda：
 ```bash
-conda create -n picGraphDBMS python=3.10
-conda activate picGraphDBMS
+conda create -n PicDBMS python=3.13.2
+conda activate PicDBMS
+cd ..
+D:
+cd d:\PicDBMS
 ```
 
 ---
@@ -42,35 +45,22 @@ pip install -r requirements.txt
 
 ---
 
-### 4. 設定 Neo4j 資料庫
+### 4. 安裝docker與milvus
 
-請先安裝並開啟 Neo4j Desktop，並新增一個 **Local DBMS**：
+請先安裝並開啟 docker：https://www.docker.com/
 
-![建立 Local DBMS 並填寫密碼](./assets/neo4j_create_db.png)
+1.在管理員模式中開啟 Docker Desktop，方法是按滑鼠右鍵並選擇以管理員身分執行。
 
-啟動資料庫後，請從圖形介面中確認你的使用者名稱與連線位址，例如：
+2.在 PowerShell 或 Windows Command Prompt 執行下列指令，為 Milvus Standalone 下載 Docker Compose 配置檔案，並啟動 Milvus。
 
-![連線資訊](./assets/neo4j_connection_info.png)
+```bash
+C:\>Invoke-WebRequest https://github.com/milvus-io/milvus/releases/download/v2.6.2/milvus-standalone-docker-compose.yml -OutFile docker-compose.yml
 
-請將這些資訊填入 `config.py` 中，例如：
-
-```python
-# Neo4j 連接設置
-NEO4J_URI = "bolt://localhost:7687"
-NEO4J_USERNAME = "neo4j"
-NEO4J_PASSWORD = "你的密碼"
-NEO4J_DATABASE = "neo4j"
+C:\>docker compose up -d
 ```
+![連線資訊](./assets/docker_windows.png)
 
----
-
-### 5. 設定 HuggingFace API Token
-
-本系統僅會在第一次下載模型使用到 HuggingFace api token，所以請至 [https://huggingface.co/settings/tokens](https://huggingface.co/settings/tokens) 申請 Access Token，並在 `config.ini` 中修改以下欄位：
-
-```python
-api_token = 你的 HuggingFace API Token
-```
+啟動資料庫後，可以安裝database的GUI：https://github.com/zilliztech/attu/releases
 
 ---
 

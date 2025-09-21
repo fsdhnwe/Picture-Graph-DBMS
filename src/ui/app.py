@@ -5,7 +5,6 @@ import shutil
 import numpy as np
 import time
 from PIL import Image
-import matplotlib.pyplot as plt
 import io
 from sklearn.manifold import TSNE
 import base64
